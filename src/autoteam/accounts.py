@@ -35,6 +35,9 @@ def is_account_disabled(acc: dict | None) -> bool:
 def _normalize_account(acc: dict) -> dict:
     normalized = dict(acc or {})
     normalized["disabled"] = bool(normalized.get("disabled", False))
+    # priority 为 None 表示未设置，由同步时自动计算
+    if "priority" not in normalized:
+        normalized["priority"] = None
     return normalized
 
 
@@ -113,6 +116,51 @@ def update_account(email, **kwargs):
         acc.update(kwargs)
         save_accounts(accounts)
     return acc
+
+
+def get_account_priority(acc: dict) -> int | None:
+    """获取账号优先级。返回 None 表示未设置，由同步逻辑自动计算。"""
+    val = acc.get("priority")
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def compute_sync_priority(acc: dict, default_pool_priority: int = 1, default_main_priority: int = 100) -> int:
+    """计算同步到 Sub2API 时的优先级（数值越小优先级越高）。
+
+    规则：
+    - 如果账号显式设置了 priority，直接使用
+    - 子号（非主号）默认优先级高（数字小），默认 1
+    - 主号默认优先级低（数字大），默认 100
+    """
+    explicit = get_account_priority(acc)
+    if explicit is not None:
+        return explicit
+    if _is_main_account_email(acc.get("email")):
+        return default_main_priority
+    return default_pool_priority
+
+
+def compute_cpa_priority(acc: dict, default_pool_priority: int = 100, default_main_priority: int = 1) -> int:
+    """计算同步到 CPA 时的优先级（数值越大优先级越高，与 Sub2API 相反）。
+
+    规则：
+    - 如果账号显式设置了 priority，反转语义：数值越小 → CPA 中数值越大
+    - 子号（非主号）默认优先级高（数字大），默认 100
+    - 主号默认优先级低（数字小），默认 1
+    """
+    explicit = get_account_priority(acc)
+    if explicit is not None:
+        # 用户设置的 priority 语义与 Sub2API 一致（小=高优先），
+        # CPA 需要反转：用 101 - explicit 映射，1→100, 100→1
+        return max(1, 101 - explicit)
+    if _is_main_account_email(acc.get("email")):
+        return default_main_priority
+    return default_pool_priority
 
 
 def get_active_accounts():

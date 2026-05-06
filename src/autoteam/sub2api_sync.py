@@ -11,6 +11,7 @@ from pathlib import Path
 
 import requests
 
+from autoteam.accounts import compute_sync_priority
 from autoteam.codex_auth import CODEX_CLIENT_ID
 from autoteam.config import (
     SUB2API_AUTO_PAUSE_ON_EXPIRED,
@@ -26,7 +27,9 @@ from autoteam.config import (
     SUB2API_PROXY,
     SUB2API_RATE_MULTIPLIER,
     SUB2API_URL,
+    SYNC_KEEP_PLANS,
 )
+from autoteam.cpa_sync import _infer_plan_from_name, _parse_keep_plans
 from autoteam.textio import read_text
 
 logger = logging.getLogger(__name__)
@@ -238,13 +241,14 @@ def _build_managed_model_mapping(model_whitelist: str | None = None) -> dict[str
     return {model: model for model in models}
 
 
-def _build_account_settings() -> dict:
-    return {
+def _build_account_settings(priority: int | None = None) -> dict:
+    settings = {
         "concurrency": SUB2API_CONCURRENCY,
-        "priority": SUB2API_PRIORITY,
+        "priority": priority if priority is not None else SUB2API_PRIORITY,
         "rate_multiplier": SUB2API_RATE_MULTIPLIER,
         "auto_pause_on_expired": SUB2API_AUTO_PAUSE_ON_EXPIRED,
     }
+    return settings
 
 
 def _apply_managed_credentials_settings(credentials: dict, *, model_whitelist: str | None = None) -> dict:
@@ -720,7 +724,7 @@ def verify_sub2api_connection() -> bool:
 
 
 def sync_to_sub2api():
-    from autoteam.accounts import STATUS_ACTIVE, is_account_disabled, load_accounts
+    from autoteam.accounts import STATUS_ACTIVE, compute_sync_priority, is_account_disabled, load_accounts
 
     accounts = load_accounts()
     local_emails = {str(acc.get("email") or "").lower() for acc in accounts if acc.get("email")}
@@ -750,6 +754,7 @@ def sync_to_sub2api():
             "auth_path": auth_path,
             "auth_data": auth_data,
             "quota_info": acc.get("last_quota"),
+            "account": acc,
         }
 
     token = _login()
@@ -784,6 +789,7 @@ def sync_to_sub2api():
         )
         _attach_group_metadata(desired_extra, group_ids, group_names)
         existing = existing_by_email.get(email)
+        priority = compute_sync_priority(target["account"])
 
         if existing:
             merged_credentials = dict(existing.get("credentials") or {})
@@ -792,7 +798,7 @@ def sync_to_sub2api():
             merged_extra.update(desired_extra)
             account_settings = None
             if overwrite_account_settings:
-                account_settings = _build_account_settings()
+                account_settings = _build_account_settings(priority=priority)
                 _apply_managed_credentials_settings(merged_credentials)
                 _apply_managed_extra_settings(merged_extra)
             _update_account(
@@ -804,7 +810,7 @@ def sync_to_sub2api():
                 group_ids=_merge_group_ids(existing, group_ids),
                 account_settings=account_settings,
             )
-            logger.info("[Sub2API] 更新: %s", email)
+            logger.info("[Sub2API] 更新: %s (priority=%d)", email, priority)
             updated += 1
             continue
 
@@ -821,26 +827,39 @@ def sync_to_sub2api():
             extra=desired_extra,
             label=f"创建账号 {email}",
             group_ids=group_ids,
-            account_settings=_build_account_settings(),
+            account_settings=_build_account_settings(priority=priority),
             proxy_id=proxy_id,
         )
-        logger.info("[Sub2API] 创建: %s", email)
+        logger.info("[Sub2API] 创建: %s (priority=%d)", email, priority)
         created += 1
 
+    keep_plans = _parse_keep_plans(SYNC_KEEP_PLANS)
+    skipped_keep = 0
     for email, account in existing_by_email.items():
         if email in local_emails and email not in active_targets:
+            if keep_plans:
+                # 从 credentials.plan_type 或账号名称推断 plan
+                plan = (account.get("credentials") or {}).get("plan_type", "")
+                if not plan:
+                    plan = _infer_plan_from_name(account.get("name") or email)
+                if plan.lower() in keep_plans:
+                    logger.info("[Sub2API] 保留 %s plan 账号: %s", plan, email)
+                    skipped_keep += 1
+                    continue
             _delete_account(token, account, label="删除非 active 账号")
             logger.info("[Sub2API] 删除非 active 账号: %s", email)
             deleted += 1
 
     final_accounts = _list_openai_oauth_accounts(token)
     final_managed = [item for item in final_accounts if _is_managed_account(item, kind=_KIND_POOL)]
+    extra = f", 保留 {skipped_keep}" if skipped_keep else ""
     logger.info(
-        "[Sub2API] 同步完成: 创建 %d, 更新 %d, 删除 %d, 远端去重 %d",
+        "[Sub2API] 同步完成: 创建 %d, 更新 %d, 删除 %d, 远端去重 %d%s",
         created,
         updated,
         deleted,
         duplicates_deleted,
+        extra,
     )
     logger.info("[Sub2API] Sub2API 中本地管理: %d, 本地 active: %d", len(final_managed), len(active_targets))
     return {
@@ -868,6 +887,8 @@ def sync_main_codex_to_sub2api(filepath):
     _attach_group_metadata(desired_extra, group_ids, group_names)
     name = f"AutoTeam Main | {email}" if email else "AutoTeam Main"
     overwrite_account_settings = SUB2API_OVERWRITE_ACCOUNT_SETTINGS
+    # 主号优先级最低（数字最大）
+    main_priority = compute_sync_priority({"email": email}, default_pool_priority=1, default_main_priority=100)
 
     current = existing_by_email.get(email) if email else None
     if current:
@@ -877,7 +898,7 @@ def sync_main_codex_to_sub2api(filepath):
         merged_extra.update(desired_extra)
         account_settings = None
         if overwrite_account_settings:
-            account_settings = _build_account_settings()
+            account_settings = _build_account_settings(priority=main_priority)
             _apply_managed_credentials_settings(merged_credentials)
             _apply_managed_extra_settings(merged_extra)
         _update_account(
@@ -901,7 +922,7 @@ def sync_main_codex_to_sub2api(filepath):
             extra=desired_extra,
             label="创建主号账号",
             group_ids=group_ids,
-            account_settings=_build_account_settings(),
+            account_settings=_build_account_settings(priority=main_priority),
         )
         account_id = created.get("id") if isinstance(created, dict) else None
 

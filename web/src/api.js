@@ -62,6 +62,7 @@ export const api = {
   loginAccount: (email) => request('POST', '/accounts/login', { email }),
   getCodexAuth: (email) => request('GET', `/accounts/${encodeURIComponent(email)}/codex-auth`),
   kickAccount: (email) => request('POST', `/accounts/${encodeURIComponent(email)}/kick`),
+  updatePriority: (email, priority) => request('PATCH', `/accounts/${encodeURIComponent(email)}/priority`, { priority }),
   getCpaFiles: () => request('GET', '/cpa/files'),
 
   startAdminLogin: (email) => request('POST', '/admin/login/start', { email }),

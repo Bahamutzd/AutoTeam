@@ -69,6 +69,7 @@
               <th class="px-4 py-3 font-medium text-right">周 剩余</th>
               <th class="px-4 py-3 font-medium">5h 重置</th>
               <th class="px-4 py-3 font-medium">周 重置</th>
+              <th class="px-4 py-3 font-medium text-center">优先级</th>
               <th class="px-4 py-3 font-medium text-right">操作</th>
             </tr>
           </thead>
@@ -100,6 +101,26 @@
               </td>
               <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'primary') }}</td>
               <td class="px-4 py-3 text-gray-400 text-xs">{{ quotaReset(acc, 'weekly') }}</td>
+              <td class="px-4 py-3 text-center">
+                <template v-if="acc.is_main_account">
+                  <span class="text-xs text-gray-500" title="主号优先级最低">最低</span>
+                </template>
+                <template v-else-if="acc.priority != null">
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium cursor-pointer transition"
+                    :class="acc.priority <= 5 ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20' : acc.priority <= 50 ? 'bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20' : 'bg-red-500/10 text-red-400 hover:bg-red-500/20'"
+                    @click="editPriority(acc)"
+                    title="点击编辑优先级">
+                    {{ acc.priority }}
+                  </span>
+                </template>
+                <template v-else>
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 cursor-pointer transition"
+                    @click="editPriority(acc)"
+                    title="点击编辑优先级（默认：子号最高）">
+                    自动
+                  </span>
+                </template>
+              </td>
               <td class="px-4 py-3 text-right space-x-2">
                 <button
                   v-if="!acc.is_main_account && !acc.disabled && acc.raw_status !== 'active'"
@@ -566,6 +587,43 @@ async function bulkEnableSelected() {
     messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
   } finally {
     bulkUpdating.value = false
+    setTimeout(() => { message.value = '' }, 8000)
+  }
+}
+
+async function editPriority(acc) {
+  if (actionDisabled.value) return
+  if (acc.is_main_account) return
+
+  const currentVal = acc.priority != null ? String(acc.priority) : ''
+  const input = window.prompt(
+    `设置 ${acc.email} 的同步优先级（数字越小优先级越高）\n\n留空 = 自动（子号最高，主号最低）\n1 = 最高优先级\n100 = 最低优先级`,
+    currentVal
+  )
+  if (input === null) return
+
+  const priority = input.trim() === '' ? null : parseInt(input.trim(), 10)
+  if (priority !== null && (isNaN(priority) || priority < 0)) {
+    message.value = '优先级必须是非负整数或留空'
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+    setTimeout(() => { message.value = '' }, 3000)
+    return
+  }
+
+  actionEmail.value = acc.email
+  actionType.value = 'priority'
+  message.value = ''
+  try {
+    const result = await api.updatePriority(acc.email, priority)
+    message.value = result.message || `已更新 ${acc.email} 优先级`
+    messageClass.value = 'bg-green-500/10 text-green-400 border-green-500/20'
+    emit('refresh')
+  } catch (e) {
+    message.value = e.message
+    messageClass.value = 'bg-red-500/10 text-red-400 border-red-500/20'
+  } finally {
+    actionEmail.value = ''
+    actionType.value = ''
     setTimeout(() => { message.value = '' }, 8000)
   }
 }

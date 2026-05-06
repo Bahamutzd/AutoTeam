@@ -2003,6 +2003,27 @@ def post_enable_account(email: str):
     return _toggle_account_disabled(email, False)
 
 
+class PriorityParams(BaseModel):
+    priority: int | None = None
+
+
+@app.patch("/api/accounts/{email}/priority")
+def patch_account_priority(email: str, params: PriorityParams):
+    """更新账号同步优先级。priority 为 null 时清除自定义值，恢复自动计算。"""
+    from autoteam.accounts import find_account, load_accounts, update_account
+
+    email = email.strip().lower()
+    if _is_main_account_email(email):
+        raise HTTPException(status_code=400, detail="主号优先级由系统自动管理，不允许手动设置")
+    accounts = load_accounts()
+    acc = find_account(accounts, email)
+    if not acc:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    update_account(email, priority=params.priority)
+    label = f"priority={params.priority}" if params.priority is not None else "priority=auto"
+    return {"message": f"已更新 {email} 优先级: {label}", "email": email, "priority": params.priority}
+
+
 @app.post("/api/accounts/{email}/kick")
 def post_kick_account(email: str):
     """将账号从 Team 中移出，状态变为 standby"""

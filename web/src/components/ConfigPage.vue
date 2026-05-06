@@ -515,6 +515,7 @@ const runtimeCategoryKeys = {
     'SUB2API_OPENAI_PASSTHROUGH',
     'SUB2API_OVERWRITE_ACCOUNT_SETTINGS',
     'SUB2API_PROXY',
+    'SYNC_KEEP_PLANS',
   ],
   proxy: ['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
@@ -596,6 +597,7 @@ const sub2apiFieldHints = {
   SUB2API_OPENAI_WS_MODE: 'ENV: SUB2API_OPENAI_WS_MODE · extra.openai_oauth_responses_websockets_v2_mode / enabled',
   SUB2API_OPENAI_PASSTHROUGH: 'ENV: SUB2API_OPENAI_PASSTHROUGH · extra.openai_passthrough',
   SUB2API_OVERWRITE_ACCOUNT_SETTINGS: 'ENV: SUB2API_OVERWRITE_ACCOUNT_SETTINGS · AutoTeam overwrite switch',
+  SYNC_KEEP_PLANS: 'ENV: SYNC_KEEP_PLANS · 同步时保留远端指定 plan 类型的认证文件（逗号分隔，如 team,plus）',
 }
 
 const selectedRuntimeCategory = computed(() => runtimeCategoryKeys[visualCategory.value] ? visualCategory.value : '')

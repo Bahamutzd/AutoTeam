@@ -16,6 +16,35 @@ from autoteam.textio import write_text
 
 logger = logging.getLogger(__name__)
 
+_VALID_PLANS = {"team", "plus", "free", "pro", "prolite"}
+
+
+def _infer_plan_from_name(name: str) -> str:
+    """从认证文件名推断 plan_type。文件名格式: codex-{email}-{plan}-{hash}.json"""
+    parts = name.rsplit("-", 2)
+    if len(parts) >= 2:
+        candidate = parts[-2].lower()
+        if candidate in _VALID_PLANS:
+            return candidate
+    # fallback: 扫描所有合法 plan 关键字
+    name_lower = name.lower()
+    for plan in ("team", "prolite", "plus", "free", "pro"):
+        if f"-{plan}-" in name_lower:
+            return plan
+    return "unknown"
+
+
+def _parse_keep_plans(value: str) -> set[str]:
+    """解析 SYNC_KEEP_PLANS 配置，返回要保留的 plan 类型集合。"""
+    if not value or not value.strip():
+        return set()
+    plans = set()
+    for part in value.split(","):
+        p = part.strip().lower()
+        if p in _VALID_PLANS:
+            plans.add(p)
+    return plans
+
 
 def _headers():
     return {"Authorization": f"Bearer {CPA_KEY}"}
@@ -67,6 +96,22 @@ def delete_from_cpa(name):
         return True
     else:
         logger.error("[CPA] 删除失败: %d %s", resp.status_code, resp.text[:200])
+        return False
+
+
+def patch_cpa_priority(name, priority):
+    """通过 PATCH API 设置 CPA 认证文件的优先级。priority=0 表示清除优先级。"""
+    resp = requests.patch(
+        f"{CPA_URL}/v0/management/auth-files/fields",
+        headers=_headers(),
+        json={"name": name, "priority": priority},
+        timeout=10,
+    )
+    if resp.status_code == 200:
+        logger.info("[CPA] 设置优先级: %s -> %d", name, priority)
+        return True
+    else:
+        logger.error("[CPA] 设置优先级失败: %s -> %d, %d %s", name, priority, resp.status_code, resp.text[:200])
         return False
 
 
@@ -522,8 +567,15 @@ def sync_to_cpa():
     同步本地认证文件到 CPA，只同步 active 状态的账号。
     - active 且 CPA 没有 → 上传
     - CPA 有但不是 active（或本地已删除）→ 从 CPA 删除
+    - 上传后通过 PATCH API 设置优先级（子号高、主号低）
     """
-    from autoteam.accounts import STATUS_ACTIVE, is_account_disabled, load_accounts, save_accounts
+    from autoteam.accounts import (
+        STATUS_ACTIVE,
+        compute_cpa_priority,
+        is_account_disabled,
+        load_accounts,
+        save_accounts,
+    )
 
     accounts = load_accounts()
     local_emails = {a["email"].lower() for a in accounts}
@@ -543,7 +595,7 @@ def sync_to_cpa():
     if changed:
         save_accounts(accounts)
 
-    # active 账号的认证文件
+    # active 账号的认证文件（带账号信息用于计算优先级）
     active_files = {}
     for acc in accounts:
         if is_account_disabled(acc):
@@ -551,7 +603,7 @@ def sync_to_cpa():
         if acc["status"] == STATUS_ACTIVE and acc.get("auth_file"):
             path = Path(acc["auth_file"])
             if path.exists():
-                active_files[path.name] = path
+                active_files[path.name] = {"path": path, "account": acc}
 
     # CPA 认证文件
     cpa_files = list_cpa_files()
@@ -561,21 +613,35 @@ def sync_to_cpa():
 
     # 上传：所有 active 认证文件（覆盖同名文件，确保 token 最新）
     uploaded = 0
-    for name, path in active_files.items():
+    for name, info in active_files.items():
         logger.info("[CPA] 上传: %s", name)
-        if upload_to_cpa(path):
+        if upload_to_cpa(info["path"]):
+            priority = compute_cpa_priority(info["account"])
+            patch_cpa_priority(name, priority)
             uploaded += 1
 
     # 删除：CPA 中有但不在 active 列表的（仅限本地管理的账号）
+    # 根据 SYNC_KEEP_PLANS 配置，保留指定 plan 类型的文件
+    from autoteam.config import SYNC_KEEP_PLANS
+
+    keep_plans = _parse_keep_plans(SYNC_KEEP_PLANS)
     deleted = 0
+    skipped_keep = 0
     for name, cpa_file in cpa_names.items():
         email = cpa_file.get("email", "").lower()
         if email in local_emails and name not in active_files:
+            if keep_plans:
+                plan = _infer_plan_from_name(name)
+                if plan in keep_plans:
+                    logger.info("[CPA] 保留 %s plan 文件: %s (%s)", plan, name, email)
+                    skipped_keep += 1
+                    continue
             logger.info("[CPA] 删除非 active 文件: %s (%s)", name, email)
             if delete_from_cpa(name):
                 deleted += 1
 
-    logger.info("[CPA] 同步完成: 上传 %d, 删除 %d, 本地去重 %d", uploaded, deleted, local_duplicates_deleted)
+    extra = f", 保留 {skipped_keep}" if skipped_keep else ""
+    logger.info("[CPA] 同步完成: 上传 %d, 删除 %d, 本地去重 %d%s", uploaded, deleted, local_duplicates_deleted, extra)
 
     # 最终状态
     final_cpa = list_cpa_files()
@@ -584,7 +650,9 @@ def sync_to_cpa():
 
 
 def sync_main_codex_to_cpa(filepath):
-    """同步主号 Codex 认证文件到 CPA。"""
+    """同步主号 Codex 认证文件到 CPA。主号优先级最低（CPA 中数值最小）。"""
+    from autoteam.accounts import compute_cpa_priority
+
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"主号认证文件不存在: {filepath}")
@@ -600,7 +668,11 @@ def sync_main_codex_to_cpa(filepath):
     if not upload_to_cpa(filepath):
         raise RuntimeError(f"上传主号认证文件失败: {name}")
 
-    logger.info("[CPA] 主号 Codex 已同步: %s", name)
+    # 主号优先级最低（CPA 中 priority 数值越小越低）
+    main_priority = compute_cpa_priority({"email": ""}, default_pool_priority=100, default_main_priority=1)
+    patch_cpa_priority(name, main_priority)
+
+    logger.info("[CPA] 主号 Codex 已同步: %s (priority=%d)", name, main_priority)
     return {"uploaded": name}
 
 

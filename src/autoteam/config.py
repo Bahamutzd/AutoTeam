@@ -89,6 +89,9 @@ SUB2API_OPENAI_WS_MODE = _normalize_sub2api_ws_mode(_get_str_env("SUB2API_OPENAI
 SUB2API_OPENAI_PASSTHROUGH = _get_bool_env("SUB2API_OPENAI_PASSTHROUGH", False)
 SUB2API_OVERWRITE_ACCOUNT_SETTINGS = _get_bool_env("SUB2API_OVERWRITE_ACCOUNT_SETTINGS", False)
 
+# 同步时保留远端指定 plan 类型的认证文件（逗号分隔），如 "team,plus" 表示保留 team 和 plus 文件
+SYNC_KEEP_PLANS = _get_str_env("SYNC_KEEP_PLANS", "")
+
 # 轮询邮件间隔/超时（秒）
 EMAIL_POLL_INTERVAL = _get_int_env("EMAIL_POLL_INTERVAL", 3)
 EMAIL_POLL_TIMEOUT = _get_int_env("EMAIL_POLL_TIMEOUT", 300)
