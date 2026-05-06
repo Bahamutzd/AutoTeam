@@ -626,7 +626,7 @@ const cfTempEmailFields = computed(() => fieldsByKeys(['CF_TEMP_EMAIL_BASE_URL',
 
 const syncCpaEnabled = computed(() => String(runtimeForm.SYNC_TARGET_CPA || '').toLowerCase() === 'true')
 const syncSub2apiEnabled = computed(() => String(runtimeForm.SYNC_TARGET_SUB2API || '').toLowerCase() === 'true')
-const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY']) : [])
+const syncCpaFields = computed(() => syncCpaEnabled.value ? fieldsByKeys(['CPA_URL', 'CPA_KEY', 'SYNC_KEEP_PLANS']) : [])
 const syncSub2apiConnectionFields = computed(() => syncSub2apiEnabled.value
   ? fieldsByKeys(['SUB2API_URL', 'SUB2API_EMAIL', 'SUB2API_PASSWORD', 'SUB2API_GROUP'])
   : [])
