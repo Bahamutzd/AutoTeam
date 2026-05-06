@@ -2166,6 +2166,15 @@ def reinvite_account(chatgpt_api, mail_client, acc):
 
     logger.info("[轮转] 恢复旧账号: %s（统一 OAuth 登录）", email)
 
+    # 先重新邀请回 Team（被移出后 plan 会变 free，必须先邀请）
+    if not _chatgpt_session_ready(chatgpt_api):
+        chatgpt_api.start()
+    invited = invite_to_team(chatgpt_api, email, seat_type="default")
+    if not invited:
+        logger.warning("[轮转] 旧账号重新邀请失败: %s", email)
+        return False
+    logger.info("[轮转] 旧账号已重新邀请回 Team: %s", email)
+
     # 关闭 ChatGPT API 浏览器避免冲突
     if _chatgpt_session_ready(chatgpt_api):
         chatgpt_api.stop()
