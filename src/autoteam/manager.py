@@ -2166,15 +2166,6 @@ def reinvite_account(chatgpt_api, mail_client, acc):
 
     logger.info("[轮转] 恢复旧账号: %s（统一 OAuth 登录）", email)
 
-    # 先重新邀请回 Team（被移出后 plan 会变 free，必须先邀请）
-    if not _chatgpt_session_ready(chatgpt_api):
-        chatgpt_api.start()
-    invited = invite_to_team(chatgpt_api, email, seat_type="default")
-    if not invited:
-        logger.warning("[轮转] 旧账号重新邀请失败: %s", email)
-        return False
-    logger.info("[轮转] 旧账号已重新邀请回 Team: %s", email)
-
     # 关闭 ChatGPT API 浏览器避免冲突
     if _chatgpt_session_ready(chatgpt_api):
         chatgpt_api.stop()
@@ -3213,6 +3204,34 @@ def cmd_pull_cpa():
         result.get("accounts_updated", 0),
         result.get("skipped", 0),
     )
+
+
+def cmd_backup():
+    """手动备份数据到 WebDAV。"""
+    from autoteam.webdav_backup import _get_webdav_config
+    from autoteam.webdav_backup import backup as do_backup
+
+    cfg = _get_webdav_config()
+    if not cfg["enabled"] or not cfg["url"]:
+        logger.error("[WebDAV] 备份未启用或未配置地址，请先在配置面板中开启")
+        return
+
+    result = do_backup()
+    if result:
+        logger.info("[WebDAV] 备份完成: %s", result)
+    else:
+        logger.error("[WebDAV] 备份失败，请查看日志")
+
+
+def cmd_restore(backup_name: str):
+    """从 WebDAV 恢复备份。"""
+    from autoteam.webdav_backup import restore as do_restore
+
+    result = do_restore(backup_name or None)
+    if result:
+        logger.info("[WebDAV] 恢复完成: %s", backup_name or "最新备份")
+    else:
+        logger.error("[WebDAV] 恢复失败，请查看日志")
     return result
 
 
@@ -3247,6 +3266,10 @@ def main():
 
     sub.add_parser("sync", help="手动同步认证文件到已启用远端")
     sub.add_parser("pull-cpa", help="从 CPA 反向同步认证文件到本地")
+
+    sub.add_parser("backup", help="手动备份数据到 WebDAV")
+    restore_p = sub.add_parser("restore", help="从 WebDAV 恢复备份")
+    restore_p.add_argument("--name", default="", help="指定备份文件名，不传则恢复最新")
 
     api_p = sub.add_parser("api", help="启动 HTTP API 服务器")
     api_p.add_argument("--host", default="0.0.0.0", help="监听地址（默认 0.0.0.0）")
@@ -3297,6 +3320,10 @@ def main():
         sync_to_cpa()
     elif args.command == "pull-cpa":
         cmd_pull_cpa()
+    elif args.command == "backup":
+        cmd_backup()
+    elif args.command == "restore":
+        cmd_restore(args.name)
     elif args.command == "api":
         from autoteam.api import start_server
 

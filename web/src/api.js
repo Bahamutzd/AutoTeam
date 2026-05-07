@@ -98,6 +98,10 @@ export const api = {
   getTask: (id) => request('GET', `/tasks/${id}`),
 
   getAutoCheckConfig: () => request('GET', '/config/auto-check'),
+
+  getBackupStatus: () => request('GET', '/backup/status'),
+  runBackup: () => request('POST', '/backup/run'),
+  restoreBackup: (name) => request('POST', '/backup/restore', { name: name || '' }),
   setAutoCheckConfig: (cfg) => request('PUT', '/config/auto-check', cfg),
 
   getTeamMembers: () => request('GET', '/team/members'),

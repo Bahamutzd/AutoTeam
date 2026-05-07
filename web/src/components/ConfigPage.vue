@@ -369,6 +369,103 @@
         </div>
       </div>
 
+      <div v-else-if="selectedRuntimeCategory === 'webdav'" class="space-y-5">
+        <div class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4">
+            <div class="text-sm font-medium text-white">WebDAV 连接配置</div>
+            <div class="mt-1 text-xs leading-5 text-slate-400">
+              填写 WebDAV 远程存储的连接信息，开启自动备份后会按间隔自动上传。
+            </div>
+          </div>
+          <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div v-for="field in webdavFields" :key="field.key" class="rounded-2xl border border-white/10 bg-slate-950/25 p-4">
+              <label class="mb-2 block text-sm font-medium text-slate-300">
+                {{ field.prompt }}
+                <span v-if="isRuntimeRequired(field)" class="text-red-400">*</span>
+              </label>
+              <select
+                v-if="isBooleanStringField(field.key)"
+                v-model="runtimeForm[field.key]"
+                class="input-dark"
+              >
+                <option value="true">启用</option>
+                <option value="false">关闭</option>
+              </select>
+              <input
+                v-else
+                v-model="runtimeForm[field.key]"
+                :type="fieldInputType(field.key)"
+                :placeholder="field.default || ''"
+                class="input-dark"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div v-if="webdavEnabled" class="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div class="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <div class="text-sm font-medium text-white">备份操作</div>
+              <div class="mt-1 text-xs leading-5 text-slate-400">
+                手动发起一次备份，或从历史备份中恢复到本地。
+              </div>
+            </div>
+            <span class="status-badge text-xs" :class="backupStatusClass">
+              {{ backupStatusText }}
+            </span>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button
+              @click="runBackupNow"
+              :disabled="backupRunning || backupRestoring"
+              class="btn-primary text-sm"
+            >
+              {{ backupRunning ? '备份中...' : '立即备份' }}
+            </button>
+          </div>
+
+          <div v-if="backupList.length" class="mt-5">
+            <div class="mb-3 text-xs font-medium text-slate-400">历史备份（点击恢复）</div>
+            <div class="max-h-48 space-y-2 overflow-y-auto">
+              <div
+                v-for="(b, idx) in backupList"
+                :key="b.name"
+                class="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-slate-950/25 px-4 py-3"
+              >
+                <div class="flex items-center gap-3">
+                  <span class="text-xs text-slate-500">#{{ idx + 1 }}</span>
+                  <span class="text-sm text-slate-300">{{ formatBackupTs(b.ts) }}</span>
+                </div>
+                <button
+                  @click="restoreBackup(b.name)"
+                  :disabled="backupRestoring"
+                  class="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+                >
+                  {{ backupRestoring && restoringName === b.name ? '恢复中...' : '恢复' }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="backupListLoaded" class="mt-4 text-xs text-slate-500">
+            暂无历史备份
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 lg:flex-row lg:items-center lg:justify-between">
+          <p class="text-xs leading-6 text-slate-400">
+            保存后会立即热加载；自动备份将在下次巡检周期内生效。
+          </p>
+          <button
+            @click="saveRuntimeConfig"
+            :disabled="runtimeSaving || runtimeLoading"
+            class="btn-primary"
+          >
+            {{ runtimeSaving ? '保存中...' : '保存配置' }}
+          </button>
+        </div>
+      </div>
+
       <div v-else class="space-y-4">
         <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           <div v-for="field in currentRuntimeFields" :key="field.key" class="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -519,6 +616,7 @@ const runtimeCategoryKeys = {
   ],
   proxy: ['PLAYWRIGHT_PROXY_URL', 'PLAYWRIGHT_PROXY_BYPASS'],
   security: ['API_KEY'],
+  webdav: ['WEBDAV_BACKUP_ENABLED', 'WEBDAV_URL', 'WEBDAV_USERNAME', 'WEBDAV_PASSWORD', 'WEBDAV_BACKUP_INTERVAL', 'WEBDAV_BACKUP_KEEP_VERSIONS'],
 }
 
 const runtimeCategoryMeta = {
@@ -552,6 +650,14 @@ const runtimeCategoryMeta = {
     note: '留空会自动生成新的 API Key；保存后前端会立即切换到新的密钥。',
     footer: '这是控制面板和 API 的入口密钥。修改后会立即生效，并同步刷新当前浏览器里的 API Key。',
   },
+  webdav: {
+    icon: '💾',
+    badge: 'Backup',
+    title: 'WebDAV 远程备份',
+    description: '配置 WebDAV 服务器信息后，开启自动备份即可按间隔自动将数据打包上传到远端，同时支持手动备份和一键恢复。',
+    note: '备份会打包 .env、accounts.json、state.json 和 auths/ 目录。密码经 Basic Auth 传输，建议搭配 HTTPS 使用。',
+    footer: '开启后服务端会按间隔自动备份，并保留最近 N 个版本。手动备份/恢复操作可在当前面板右侧操作区执行。',
+  },
 }
 
 const visualCategories = [
@@ -562,6 +668,7 @@ const visualCategories = [
   { key: 'auto-check', label: '巡检设置', icon: '🔄' },
   { key: 'source', label: '源文件编辑', icon: '📝' },
   { key: 'proxy', label: '代理 / 高级', icon: '🛰️' },
+  { key: 'webdav', label: 'WebDAV 备份', icon: '💾' },
 ]
 
 const visualCategory = ref('cloudmail')
@@ -582,6 +689,15 @@ const sourceSaving = ref(false)
 const sourceLoaded = ref(false)
 const sourceMessage = ref('')
 const sourceMessageClass = ref('')
+
+const backupList = ref([])
+const backupListLoaded = ref(false)
+const backupRunning = ref(false)
+const backupRestoring = ref(false)
+const restoringName = ref('')
+const backupStatusText = ref('')
+const backupStatusClass = ref('')
+
 const runtimeRequiredKeys = new Set(['API_KEY'])
 const sub2apiFieldHints = {
   SUB2API_URL: 'ENV: SUB2API_URL · Sub2API API base URL',
@@ -619,6 +735,8 @@ function fieldsByKeys(keys) {
 
 const securityFields = computed(() => fieldsByKeys(runtimeCategoryKeys.security))
 const proxyFields = computed(() => fieldsByKeys(runtimeCategoryKeys.proxy))
+const webdavFields = computed(() => fieldsByKeys(runtimeCategoryKeys.webdav))
+const webdavEnabled = computed(() => String(runtimeForm.WEBDAV_BACKUP_ENABLED || '').toLowerCase() === 'true')
 const syncToggleFields = computed(() => fieldsByKeys(['SYNC_TARGET_CPA', 'SYNC_TARGET_SUB2API']))
 const selectedMailProvider = computed(() => String(runtimeForm.MAIL_PROVIDER || 'cloudmail').toLowerCase() === 'cloudflare_temp_email' ? 'cloudflare_temp_email' : 'cloudmail')
 const cloudmailProviderFields = computed(() => fieldsByKeys(['CLOUDMAIL_BASE_URL', 'CLOUDMAIL_EMAIL', 'CLOUDMAIL_PASSWORD', 'CLOUDMAIL_DOMAIN']))
@@ -891,9 +1009,74 @@ async function saveSourceConfig() {
   }
 }
 
+async function loadBackupStatus() {
+  try {
+    const result = await api.getBackupStatus()
+    backupList.value = result.backups || []
+    backupListLoaded.value = true
+    if (result.enabled && result.configured) {
+      backupStatusText.value = '已连接 · ' + backupList.value.length + ' 个版本'
+      backupStatusClass.value = 'text-emerald-400'
+    } else if (result.enabled && !result.configured) {
+      backupStatusText.value = '未配置地址'
+      backupStatusClass.value = 'text-amber-400'
+    } else {
+      backupStatusText.value = '未启用'
+      backupStatusClass.value = 'text-slate-400'
+    }
+  } catch (e) {
+    backupStatusText.value = '加载失败'
+    backupStatusClass.value = 'text-red-400'
+    backupListLoaded.value = true
+  }
+}
+
+async function runBackupNow() {
+  backupRunning.value = true
+  try {
+    const result = await api.runBackup()
+    if (result.success) {
+      backupStatusText.value = '备份成功 · ' + result.filename
+      backupStatusClass.value = 'text-emerald-400'
+      await loadBackupStatus()
+      setRuntimeMessage('备份完成: ' + result.filename)
+    }
+  } catch (e) {
+    setRuntimeMessage(e.message, 'error')
+  } finally {
+    backupRunning.value = false
+  }
+}
+
+async function restoreBackup(name) {
+  if (!confirm('确定要恢复备份 "' + (name || '最新') + '" 吗？当前数据将被覆盖。')) return
+  backupRestoring.value = true
+  restoringName.value = name
+  try {
+    const result = await api.restoreBackup(name)
+    if (result.success) {
+      setRuntimeMessage(result.message)
+      emit('refresh')
+    }
+  } catch (e) {
+    setRuntimeMessage(e.message, 'error')
+  } finally {
+    backupRestoring.value = false
+    restoringName.value = ''
+  }
+}
+
+function formatBackupTs(ts) {
+  if (!ts || ts.length < 14) return ts
+  return ts.slice(0, 4) + '-' + ts.slice(4, 6) + '-' + ts.slice(6, 8) + ' ' + ts.slice(9, 11) + ':' + ts.slice(11, 13) + ':' + ts.slice(13, 15)
+}
+
 watch(visualCategory, async (next) => {
   if (next === 'source' && !sourceLoaded.value) {
     await loadSourceConfig()
+  }
+  if (next === 'webdav' && !backupListLoaded.value) {
+    await loadBackupStatus()
   }
 })
 

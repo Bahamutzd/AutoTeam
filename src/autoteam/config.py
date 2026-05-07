@@ -114,6 +114,14 @@ PLAYWRIGHT_PROXY_USERNAME = os.environ.get("PLAYWRIGHT_PROXY_USERNAME", "").stri
 PLAYWRIGHT_PROXY_PASSWORD = os.environ.get("PLAYWRIGHT_PROXY_PASSWORD", "").strip()
 PLAYWRIGHT_PROXY_BYPASS = os.environ.get("PLAYWRIGHT_PROXY_BYPASS", "").strip()
 
+# WebDAV 远程备份
+WEBDAV_BACKUP_ENABLED = _get_bool_env("WEBDAV_BACKUP_ENABLED", False)
+WEBDAV_URL = os.environ.get("WEBDAV_URL", "").strip()
+WEBDAV_USERNAME = os.environ.get("WEBDAV_USERNAME", "").strip()
+WEBDAV_PASSWORD = os.environ.get("WEBDAV_PASSWORD", "").strip()
+WEBDAV_BACKUP_INTERVAL = _get_int_env("WEBDAV_BACKUP_INTERVAL", 3600)  # 备份间隔（秒），默认 1 小时
+WEBDAV_BACKUP_KEEP_VERSIONS = _get_int_env("WEBDAV_BACKUP_KEEP_VERSIONS", 10)  # 保留最近 N 个版本
+
 
 def _format_proxy_host(hostname: str) -> str:
     if ":" in hostname and not hostname.startswith("["):

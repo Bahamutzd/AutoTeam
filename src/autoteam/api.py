@@ -87,6 +87,7 @@ class SetupConfig(BaseModel):
     SYNC_TARGET_CPA: str | bool = ""
     CPA_URL: str = "http://127.0.0.1:8317"
     CPA_KEY: str = ""
+    SYNC_KEEP_PLANS: str = ""
     SYNC_TARGET_SUB2API: str | bool = ""
     SUB2API_URL: str = ""
     SUB2API_EMAIL: str = ""
@@ -103,6 +104,12 @@ class SetupConfig(BaseModel):
     SUB2API_OVERWRITE_ACCOUNT_SETTINGS: str | bool = "false"
     PLAYWRIGHT_PROXY_URL: str = ""
     PLAYWRIGHT_PROXY_BYPASS: str = ""
+    WEBDAV_BACKUP_ENABLED: str | bool = "false"
+    WEBDAV_URL: str = ""
+    WEBDAV_USERNAME: str = ""
+    WEBDAV_PASSWORD: str = ""
+    WEBDAV_BACKUP_INTERVAL: str | int = "3600"
+    WEBDAV_BACKUP_KEEP_VERSIONS: str | int = "10"
     API_KEY: str = ""
 
 
@@ -116,6 +123,9 @@ _RUNTIME_CONFIG_CLEARABLE_FIELDS = {
     "SUB2API_MODEL_WHITELIST",
     "PLAYWRIGHT_PROXY_URL",
     "PLAYWRIGHT_PROXY_BYPASS",
+    "WEBDAV_URL",
+    "WEBDAV_USERNAME",
+    "WEBDAV_PASSWORD",
 }
 
 _CLOUDMAIL_REQUIRED_KEYS = ("CLOUDMAIL_BASE_URL", "CLOUDMAIL_EMAIL", "CLOUDMAIL_PASSWORD", "CLOUDMAIL_DOMAIN")
@@ -169,6 +179,12 @@ _ALL_RUNTIME_ENV_KEYS = [
     "PLAYWRIGHT_PROXY_USERNAME",
     "PLAYWRIGHT_PROXY_PASSWORD",
     "PLAYWRIGHT_PROXY_BYPASS",
+    "WEBDAV_BACKUP_ENABLED",
+    "WEBDAV_URL",
+    "WEBDAV_USERNAME",
+    "WEBDAV_PASSWORD",
+    "WEBDAV_BACKUP_INTERVAL",
+    "WEBDAV_BACKUP_KEEP_VERSIONS",
 ]
 _RUNTIME_ENV_BASE = {key: os.environ.get(key) for key in _ALL_RUNTIME_ENV_KEYS}
 _runtime_env_reload_lock = threading.Lock()
@@ -3113,6 +3129,8 @@ def _start_auto_check():
     _sync_runtime_env_reload_state()
     thread = threading.Thread(target=_auto_check_loop, daemon=True)
     thread.start()
+    backup_thread = threading.Thread(target=_auto_backup_loop, daemon=True)
+    backup_thread.start()
 
 
 @app.on_event("shutdown")
@@ -3122,6 +3140,98 @@ def _stop_auto_check():
         _pw_executor.stop()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# WebDAV 备份
+# ---------------------------------------------------------------------------
+
+_backup_stop = threading.Event()
+
+
+def _auto_backup_loop():
+    """后台自动备份线程"""
+    from autoteam.webdav_backup import _get_webdav_config
+    from autoteam.webdav_backup import backup as do_backup
+
+    while True:
+        try:
+            cfg = _get_webdav_config()
+        except Exception:
+            cfg = {"enabled": False}
+
+        if cfg.get("enabled"):
+            interval = max(30, int(cfg.get("interval", 3600)))
+        else:
+            interval = 30
+
+        if _backup_stop.wait(interval):
+            return
+
+        if not cfg.get("enabled"):
+            continue
+
+        try:
+            do_backup()
+        except Exception as exc:
+            logger.warning("[WebDAV] 自动备份失败: %s", exc)
+
+
+@app.get("/api/backup/status")
+def get_backup_status():
+    """获取 WebDAV 备份状态和备份列表"""
+    try:
+        from autoteam.webdav_backup import _get_webdav_config, list_backups
+
+        cfg = _get_webdav_config()
+        backups = list_backups() if cfg["enabled"] else []
+        return {
+            "enabled": cfg["enabled"],
+            "configured": bool(cfg["url"]),
+            "backups": backups,
+        }
+    except Exception as exc:
+        return {"enabled": False, "configured": False, "backups": [], "error": str(exc)}
+
+
+@app.post("/api/backup/run")
+def run_backup():
+    """手动触发一次备份"""
+    try:
+        from autoteam.webdav_backup import _get_webdav_config
+        from autoteam.webdav_backup import backup as do_backup
+
+        cfg = _get_webdav_config()
+        if not cfg["enabled"] or not cfg["url"]:
+            raise HTTPException(status_code=400, detail="WebDAV 备份未启用或未配置地址")
+
+        result = do_backup()
+        if result:
+            return {"success": True, "filename": result}
+        raise HTTPException(status_code=500, detail="备份失败，请查看服务端日志")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/backup/restore")
+def restore_backup(payload: dict | None = None):
+    """从 WebDAV 恢复备份"""
+    try:
+        from autoteam.webdav_backup import restore as do_restore
+
+        name = ""
+        if isinstance(payload, dict):
+            name = payload.get("name", "")
+        result = do_restore(name or None)
+        if result:
+            return {"success": True, "message": f"已从 {name or '最新备份'} 恢复"}
+        raise HTTPException(status_code=500, detail="恢复失败，请查看服务端日志")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------

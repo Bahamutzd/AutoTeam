@@ -53,6 +53,12 @@ REQUIRED_CONFIGS = [
     ("SUB2API_OVERWRITE_ACCOUNT_SETTINGS", "Sub2API 同步时覆盖账号默认设置（true/false）", "false", True),
     ("PLAYWRIGHT_PROXY_URL", "Playwright 浏览器代理 URL（可选，如 socks5://host:port）", "", True),
     ("PLAYWRIGHT_PROXY_BYPASS", "Playwright 代理绕过列表（可选，如 localhost,127.0.0.1）", "", True),
+    ("WEBDAV_BACKUP_ENABLED", "启用 WebDAV 自动备份（true/false）", "false", True),
+    ("WEBDAV_URL", "WebDAV 服务地址", "", True),
+    ("WEBDAV_USERNAME", "WebDAV 用户名", "", True),
+    ("WEBDAV_PASSWORD", "WebDAV 密码", "", True),
+    ("WEBDAV_BACKUP_INTERVAL", "WebDAV 自动备份间隔（秒），默认 3600（1小时）", "3600", True),
+    ("WEBDAV_BACKUP_KEEP_VERSIONS", "WebDAV 保留最近备份版本数", "10", True),
     ("API_KEY", "API 鉴权密钥（回车自动生成）", "", False),
 ]
 
