@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from hashlib import md5
@@ -17,18 +18,32 @@ from autoteam.textio import write_text
 logger = logging.getLogger(__name__)
 
 _VALID_PLANS = {"team", "plus", "free", "pro", "prolite"}
+_PLAN_SCAN_ORDER = ("team", "prolite", "plus", "free", "pro")
+_WINDOWS_COPY_SUFFIX_RE = re.compile(r"\s+\(\d+\)$")
 
 
 def _infer_plan_from_name(name: str) -> str:
-    """从认证文件名推断 plan_type。文件名格式: codex-{email}-{plan}-{hash}.json"""
-    parts = name.rsplit("-", 2)
+    """从认证文件名推断 plan_type，兼容有无 hash 和 Windows 复制后缀的文件名。"""
+    base = Path(name).name.strip()
+    if base.lower().endswith(".json"):
+        base = base[:-5]
+    base = _WINDOWS_COPY_SUFFIX_RE.sub("", base)
+
+    parts = base.rsplit("-", 2)
+    candidates = []
     if len(parts) >= 2:
-        candidate = parts[-2].lower()
-        if candidate in _VALID_PLANS:
-            return candidate
+        candidates.append(parts[-2])
+    if parts:
+        candidates.append(parts[-1])
+
+    for candidate in candidates:
+        plan = _WINDOWS_COPY_SUFFIX_RE.sub("", candidate).strip().lower()
+        if plan in _VALID_PLANS:
+            return plan
+
     # fallback: 扫描所有合法 plan 关键字
-    name_lower = name.lower()
-    for plan in ("team", "prolite", "plus", "free", "pro"):
+    name_lower = f"{base.lower()}-"
+    for plan in _PLAN_SCAN_ORDER:
         if f"-{plan}-" in name_lower:
             return plan
     return "unknown"
