@@ -1,6 +1,14 @@
+import base64
+import json
 from pathlib import Path
 
 from autoteam import cpa_sync
+
+
+def _auth_content_with_plan(plan):
+    payload = {"https://api.openai.com/auth": {"chatgpt_plan_type": plan}}
+    encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return json.dumps({"type": "codex", "id_token": f"header.{encoded_payload}.signature"})
 
 
 def test_infer_plan_from_name_handles_unhashed_and_windows_copy_names():
@@ -15,6 +23,15 @@ def test_infer_plan_from_name_handles_unhashed_and_windows_copy_names():
 
     for name, expected in cases.items():
         assert cpa_sync._infer_plan_from_name(name) == expected
+
+
+def test_resolve_cpa_plan_type_prefers_metadata_before_download(monkeypatch):
+    def fail_download(_name):
+        raise AssertionError("metadata plan should not download auth content")
+
+    monkeypatch.setattr(cpa_sync, "download_from_cpa", fail_download)
+
+    assert cpa_sync._resolve_cpa_plan_type("codex-user@example.com-free.json", {"plan_type": "plus"}) == "plus"
 
 
 def test_sync_to_cpa_skips_disabled_accounts_and_deletes_remote_copy(monkeypatch, tmp_path):
@@ -32,6 +49,7 @@ def test_sync_to_cpa_skips_disabled_accounts_and_deletes_remote_copy(monkeypatch
     )
     monkeypatch.setattr("autoteam.accounts.save_accounts", lambda _accounts: None)
     monkeypatch.setattr(cpa_sync, "_cleanup_local_duplicates", lambda _accounts: (0, False))
+    monkeypatch.setattr("autoteam.config.SYNC_KEEP_PLANS", "")
     monkeypatch.setattr(
         cpa_sync,
         "list_cpa_files",
@@ -51,6 +69,33 @@ def test_sync_to_cpa_skips_disabled_accounts_and_deletes_remote_copy(monkeypatch
 
     assert uploaded == [enabled_auth.name]
     assert deleted == [disabled_auth.name]
+
+
+def test_sync_to_cpa_uses_downloaded_plan_before_filename(monkeypatch):
+    monkeypatch.setattr(
+        "autoteam.accounts.load_accounts",
+        lambda: [
+            {"email": "plus@example.com", "status": "standby", "auth_file": "", "disabled": False},
+        ],
+    )
+    monkeypatch.setattr("autoteam.accounts.save_accounts", lambda _accounts: None)
+    monkeypatch.setattr(cpa_sync, "_cleanup_local_duplicates", lambda _accounts: (0, False))
+    monkeypatch.setattr("autoteam.config.SYNC_KEEP_PLANS", "plus")
+    monkeypatch.setattr(
+        cpa_sync,
+        "list_cpa_files",
+        lambda: [
+            {"name": "codex-plus@example.com-plus.json", "email": "plus@example.com"},
+        ],
+    )
+    monkeypatch.setattr(cpa_sync, "download_from_cpa", lambda _name: _auth_content_with_plan("free"))
+
+    deleted = []
+    monkeypatch.setattr(cpa_sync, "delete_from_cpa", lambda name: deleted.append(name) or True)
+
+    cpa_sync.sync_to_cpa()
+
+    assert deleted == ["codex-plus@example.com-plus.json"]
 
 
 def test_sync_to_cpa_respects_keep_plans_for_unhashed_cpa_files(monkeypatch, tmp_path):
@@ -86,6 +131,7 @@ def test_sync_to_cpa_respects_keep_plans_for_unhashed_cpa_files(monkeypatch, tmp
     deleted = []
     monkeypatch.setattr(cpa_sync, "upload_to_cpa", lambda path: uploaded.append(Path(path).name) or True)
     monkeypatch.setattr(cpa_sync, "patch_cpa_priority", lambda _name, _priority: True)
+    monkeypatch.setattr(cpa_sync, "download_from_cpa", lambda _name: None)
     monkeypatch.setattr(cpa_sync, "delete_from_cpa", lambda name: deleted.append(name) or True)
 
     cpa_sync.sync_to_cpa()

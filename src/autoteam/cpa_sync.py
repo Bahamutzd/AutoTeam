@@ -211,6 +211,62 @@ def _bundle_from_auth_data(auth_data, fallback_name=""):
     }
 
 
+def _normalize_plan_type(value):
+    plan = str(value or "").strip().lower()
+    return plan if plan in _VALID_PLANS else ""
+
+
+def _plan_from_mapping(data):
+    if not isinstance(data, dict):
+        return ""
+    for key in ("plan_type", "chatgpt_plan_type", "plan"):
+        plan = _normalize_plan_type(data.get(key))
+        if plan:
+            return plan
+    return ""
+
+
+def _plan_from_cpa_metadata(cpa_file):
+    """优先使用 CPA 列表接口可能返回的 plan 元数据。"""
+    plan = _plan_from_mapping(cpa_file)
+    if plan:
+        return plan
+
+    if not isinstance(cpa_file, dict):
+        return ""
+    for key in ("fields", "metadata", "credentials"):
+        plan = _plan_from_mapping(cpa_file.get(key))
+        if plan:
+            return plan
+    return ""
+
+
+def _resolve_cpa_plan_type(name, cpa_file=None):
+    """解析 CPA 远端文件真实 plan；最后才回退到文件名推断。"""
+    plan = _plan_from_cpa_metadata(cpa_file or {})
+    if plan:
+        return plan
+
+    content = download_from_cpa(name)
+    if content:
+        try:
+            auth_data = json.loads(content)
+        except Exception:
+            auth_data = {}
+        if isinstance(auth_data, dict):
+            bundle = _bundle_from_auth_data(auth_data, fallback_name="")
+            plan = _normalize_plan_type(bundle.get("plan_type"))
+            if not plan:
+                plan = _plan_from_mapping(auth_data)
+            if plan:
+                filename_plan = _infer_plan_from_name(name)
+                if filename_plan != "unknown" and filename_plan != plan:
+                    logger.info("[CPA] plan_type 以认证内容为准: %s -> %s (%s)", filename_plan, plan, name)
+                return plan
+
+    return _infer_plan_from_name(name)
+
+
 def _normalized_auth_path(bundle, main=False):
     email = bundle.get("email", "")
     account_id = bundle.get("account_id", "")
@@ -646,7 +702,7 @@ def sync_to_cpa():
         email = cpa_file.get("email", "").lower()
         if email in local_emails and name not in active_files:
             if keep_plans:
-                plan = _infer_plan_from_name(name)
+                plan = _resolve_cpa_plan_type(name, cpa_file)
                 if plan in keep_plans:
                     logger.info("[CPA] 保留 %s plan 文件: %s (%s)", plan, name, email)
                     skipped_keep += 1
