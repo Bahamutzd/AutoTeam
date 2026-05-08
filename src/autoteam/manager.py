@@ -2171,6 +2171,22 @@ def reinvite_account(chatgpt_api, mail_client, acc):
         chatgpt_api.stop()
 
     login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+
+    # 如果登录失败是因为账号不在 Team workspace 中（未检测到工作空间选择页），
+    # 先邀请加入 Team，再重新登录
+    if not login_result.get("ok") and login_result.get("error_type") == "non_team_plan":
+        logger.info("[轮转] 旧账号未进入 Team workspace，尝试邀请加入: %s", email)
+        if not _chatgpt_session_ready(chatgpt_api):
+            chatgpt_api.start()
+        invited = invite_to_team(chatgpt_api, email, seat_type="default")
+        if not invited:
+            logger.warning("[轮转] 邀请旧账号加入 Team 失败: %s", email)
+        else:
+            logger.info("[轮转] 旧账号已受邀加入 Team，重新 OAuth 登录: %s", email)
+            if _chatgpt_session_ready(chatgpt_api):
+                chatgpt_api.stop()
+            login_result = _login_codex_with_result(email, password, mail_client=mail_client)
+
     bundle = login_result.get("bundle")
     if not login_result.get("ok") or not bundle:
         result = _record_auth_repair_failure(
