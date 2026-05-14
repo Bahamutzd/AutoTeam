@@ -2761,8 +2761,7 @@ def _auto_check_loop():
             else:
                 actionable_repair_candidates.append(candidate_email)
 
-        cpa_file_count = -1
-        cpa_mismatch = False
+        cpa_missing_accounts: list[dict] = []
         try:
             from autoteam.cpa_sync import list_cpa_files
             from autoteam.config import CPA_URL, CPA_KEY
@@ -2772,10 +2771,14 @@ def _auto_check_loop():
                 cpa_emails = {
                     (item.get("email") or "").lower() for item in cpa_files if (item.get("email") or "").strip()
                 }
-                local_active_emails = {a["email"].lower() for a in active}
-                cpa_matched = sum(1 for e in local_active_emails if e in cpa_emails)
-                cpa_file_count = cpa_matched
-                cpa_mismatch = cpa_matched < len(active)
+                for acc in active:
+                    if acc["email"].lower() not in cpa_emails:
+                        cpa_missing_accounts.append(acc)
+                if cpa_missing_accounts:
+                    cpa_file_count = len(active) - len(cpa_missing_accounts)
+                else:
+                    cpa_file_count = len(active)
+                cpa_mismatch = len(cpa_missing_accounts) > 0
         except Exception as exc:
             logger.warning("[巡检] CPA 文件数校验失败，跳过本轮 CPA 对账: %s", exc)
 
@@ -2793,6 +2796,7 @@ def _auto_check_loop():
             "throttled_repair_candidates": throttled_repair_candidates,
             "cpa_file_count": cpa_file_count,
             "cpa_mismatch": cpa_mismatch,
+            "cpa_missing_accounts": cpa_missing_accounts,
         }
 
     while not _auto_check_stop.is_set():
@@ -2843,18 +2847,35 @@ def _auto_check_loop():
                 )
 
             if state.get("cpa_mismatch"):
-                cpa_count = state.get("cpa_file_count", -1)
+                missing = state.get("cpa_missing_accounts") or []
                 logger.warning(
-                    "[巡检] CPA 远端文件数不足: %d/%d，触发自动同步...",
-                    cpa_count,
+                    "[巡检] CPA 远端缺少 %d/%d 个本地 active 账号的认证文件，开始补上传: %s",
+                    len(missing),
                     len(state["active"]),
+                    ", ".join(a["email"] for a in missing),
                 )
-                try:
-                    from autoteam.cpa_sync import sync_to_cpa
+                uploaded = 0
+                failed = 0
+                for acc in missing:
+                    auth_file = acc.get("auth_file")
+                    if not auth_file or not Path(auth_file).exists():
+                        logger.warning("[巡检] 账号 %s 无本地认证文件，跳过 CPA 上传", acc["email"])
+                        failed += 1
+                        continue
+                    try:
+                        from autoteam.cpa_sync import upload_to_cpa, patch_cpa_priority
+                        from autoteam.accounts import compute_cpa_priority
 
-                    sync_to_cpa()
-                except Exception as exc:
-                    logger.warning("[巡检] CPA 自动同步失败: %s", exc)
+                        if upload_to_cpa(auth_file):
+                            priority = compute_cpa_priority(acc)
+                            patch_cpa_priority(Path(auth_file).name, priority)
+                            uploaded += 1
+                        else:
+                            failed += 1
+                    except Exception as exc:
+                        logger.warning("[巡检] 上传 %s 到 CPA 失败: %s", acc["email"], exc)
+                        failed += 1
+                logger.info("[巡检] CPA 补上传完成: 成功 %d, 失败 %d", uploaded, failed)
 
             seat_shortage = max(0, target_seats - 1 - local_active_count)
             actual_team_count = -1
