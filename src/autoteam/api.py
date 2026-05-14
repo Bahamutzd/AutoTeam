@@ -2761,6 +2761,24 @@ def _auto_check_loop():
             else:
                 actionable_repair_candidates.append(candidate_email)
 
+        cpa_file_count = -1
+        cpa_mismatch = False
+        try:
+            from autoteam.cpa_sync import list_cpa_files
+            from autoteam.config import CPA_URL, CPA_KEY
+
+            if CPA_URL and CPA_KEY:
+                cpa_files = list_cpa_files()
+                cpa_emails = {
+                    (item.get("email") or "").lower() for item in cpa_files if (item.get("email") or "").strip()
+                }
+                local_active_emails = {a["email"].lower() for a in active}
+                cpa_matched = sum(1 for e in local_active_emails if e in cpa_emails)
+                cpa_file_count = cpa_matched
+                cpa_mismatch = cpa_matched < len(active)
+        except Exception as exc:
+            logger.warning("[巡检] CPA 文件数校验失败，跳过本轮 CPA 对账: %s", exc)
+
         return {
             "accounts": accounts,
             "account_by_email": account_by_email,
@@ -2773,6 +2791,8 @@ def _auto_check_loop():
             "repair_candidates": repair_candidates,
             "actionable_repair_candidates": actionable_repair_candidates,
             "throttled_repair_candidates": throttled_repair_candidates,
+            "cpa_file_count": cpa_file_count,
+            "cpa_mismatch": cpa_mismatch,
         }
 
     while not _auto_check_stop.is_set():
@@ -2821,6 +2841,20 @@ def _auto_check_loop():
                     len(auth_problem_accounts),
                     ", ".join(auth_problem_accounts),
                 )
+
+            if state.get("cpa_mismatch"):
+                cpa_count = state.get("cpa_file_count", -1)
+                logger.warning(
+                    "[巡检] CPA 远端文件数不足: %d/%d，触发自动同步...",
+                    cpa_count,
+                    len(state["active"]),
+                )
+                try:
+                    from autoteam.cpa_sync import sync_to_cpa
+
+                    sync_to_cpa()
+                except Exception as exc:
+                    logger.warning("[巡检] CPA 自动同步失败: %s", exc)
 
             seat_shortage = max(0, target_seats - 1 - local_active_count)
             actual_team_count = -1
