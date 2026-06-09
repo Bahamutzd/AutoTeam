@@ -98,6 +98,31 @@ def test_sync_to_cpa_uses_downloaded_plan_before_filename(monkeypatch):
     assert deleted == ["codex-plus@example.com-plus.json"]
 
 
+def test_sync_main_codex_to_cpa_sets_lowest_priority(monkeypatch, tmp_path):
+    main_auth = tmp_path / "codex-main-d696cc72.json"
+    main_auth.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        cpa_sync,
+        "list_cpa_files",
+        lambda: [
+            {"name": "codex-main-old.json", "email": ""},
+        ],
+    )
+
+    deleted = []
+    patched = []
+    monkeypatch.setattr(cpa_sync, "delete_from_cpa", lambda name: deleted.append(name) or True)
+    monkeypatch.setattr(cpa_sync, "upload_to_cpa", lambda path: Path(path).name == main_auth.name)
+    monkeypatch.setattr(cpa_sync, "patch_cpa_priority", lambda name, priority: patched.append((name, priority)) or True)
+
+    result = cpa_sync.sync_main_codex_to_cpa(main_auth)
+
+    assert deleted == ["codex-main-old.json"]
+    assert patched == [(main_auth.name, 1)]
+    assert result == {"uploaded": main_auth.name}
+
+
 def test_sync_to_cpa_respects_keep_plans_for_unhashed_cpa_files(monkeypatch, tmp_path):
     active_auth = tmp_path / "codex-active@example.com-team-a.json"
     active_auth.write_text("{}", encoding="utf-8")

@@ -722,8 +722,6 @@ def sync_to_cpa():
 
 def sync_main_codex_to_cpa(filepath):
     """同步主号 Codex 认证文件到 CPA。主号优先级最低（CPA 中数值最小）。"""
-    from autoteam.accounts import compute_cpa_priority
-
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"主号认证文件不存在: {filepath}")
@@ -740,7 +738,7 @@ def sync_main_codex_to_cpa(filepath):
         raise RuntimeError(f"上传主号认证文件失败: {name}")
 
     # 主号优先级最低（CPA 中 priority 数值越小越低）
-    main_priority = compute_cpa_priority({"email": ""}, default_pool_priority=100, default_main_priority=1)
+    main_priority = 1
     patch_cpa_priority(name, main_priority)
 
     logger.info("[CPA] 主号 Codex 已同步: %s (priority=%d)", name, main_priority)
