@@ -24,6 +24,45 @@
         {{ message }}
       </div>
 
+      <div class="mb-4 rounded-xl border border-sky-500/20 bg-sky-500/5 p-4 text-sm">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div class="font-medium text-sky-200">远程 Playwright 窗口</div>
+            <div class="mt-1 text-xs leading-relaxed text-gray-400">
+              服务器部署时通过 noVNC 直接接管后端 Chromium。需要先用 API Key 登录本面板；不要手动打开 <span class="font-mono">/api/desktop/status</span>，直开 API 会被鉴权拦截。
+            </div>
+          </div>
+          <button
+            @click="openDesktop"
+            :disabled="desktopLoading"
+            class="shrink-0 rounded-lg border px-3 py-2 text-xs transition disabled:opacity-50"
+            :class="desktopLoading
+              ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+              : 'bg-sky-600/10 text-sky-300 border-sky-500/30 hover:bg-sky-600/20'"
+          >
+            {{ desktopLoading ? '打开中...' : '打开远程浏览器窗口' }}
+          </button>
+        </div>
+        <div v-if="desktopStatus" class="mt-3 rounded-lg border border-sky-500/10 bg-gray-950/30 px-3 py-2 text-xs text-gray-300">
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <span class="text-sky-300">状态:</span>
+              {{ desktopStatus.detail || (desktopStatus.enabled ? '可用' : '不可用') }}
+              <span v-if="desktopStatus.display" class="ml-2 text-gray-500">DISPLAY={{ desktopStatus.display }}</span>
+            </div>
+            <a
+              v-if="desktopStatus.url"
+              :href="desktopStatus.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-sky-300 hover:underline"
+            >
+              重新打开
+            </a>
+          </div>
+        </div>
+      </div>
+
       <div v-if="adminConfigured && !adminBusy" class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
         <div class="px-3 py-3 bg-gray-800/60 border border-gray-800 rounded-lg">
           <div class="text-gray-500 mb-1">管理员邮箱</div>
@@ -347,35 +386,6 @@
             >
               {{ screenshotsLoading ? '加载中...' : '查看截图列表' }}
             </button>
-            <button
-              @click="openDesktop"
-              :disabled="desktopLoading"
-              class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
-              :class="desktopLoading
-                ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
-                : 'bg-sky-600/10 text-sky-400 border-sky-500/30 hover:bg-sky-600/20'"
-            >
-              {{ desktopLoading ? '打开中...' : '打开远程浏览器窗口' }}
-            </button>
-          </div>
-
-          <div v-if="desktopStatus" class="mb-3 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-100">
-            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-              <div>
-                <span class="text-sky-300">远程窗口:</span>
-                <span class="text-gray-300">{{ desktopStatus.detail || (desktopStatus.enabled ? '可用' : '不可用') }}</span>
-                <span v-if="desktopStatus.display" class="ml-2 text-gray-500">DISPLAY={{ desktopStatus.display }}</span>
-              </div>
-              <a
-                v-if="desktopStatus.url"
-                :href="desktopStatus.url"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="text-sky-300 hover:underline"
-              >
-                重新打开
-              </a>
-            </div>
           </div>
 
           <!-- 页面快照结果 -->
