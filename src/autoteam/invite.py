@@ -21,7 +21,7 @@ import os
 import sys
 import time
 
-from playwright.sync_api import sync_playwright
+from autoteam.browser_runtime import sync_playwright
 
 from autoteam.chatgpt_api import ChatGPTTeamAPI
 from autoteam.config import get_playwright_launch_options

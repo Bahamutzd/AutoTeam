@@ -21,8 +21,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --no-dev
 
-# 安装 Playwright 浏览器
+# 安装 Playwright 浏览器（patchright 优先，回退官方 playwright）
 RUN uv run playwright install chromium && uv run playwright install-deps chromium
+RUN uv run patchright install chromium || echo "patchright 未安装，跳过"
 
 # 复制源码
 COPY src/ src/

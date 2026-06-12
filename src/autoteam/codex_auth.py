@@ -10,8 +10,6 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
 import autoteam.display  # noqa: F401
 from autoteam.admin_state import (
     get_admin_email,
@@ -20,6 +18,7 @@ from autoteam.admin_state import (
     get_chatgpt_workspace_name,
 )
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
+from autoteam.browser_runtime import USING_PATCHRIGHT, sync_playwright
 from autoteam.config import get_playwright_launch_options
 from autoteam.signup_profile import SignupProfile, generate_signup_profile
 from autoteam.textio import write_text
@@ -919,6 +918,10 @@ def login_codex_via_browser(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         )
+        if not USING_PATCHRIGHT:
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
 
         # === Step 0: 先登录 ChatGPT 并切换到 Team workspace ===
         # 登录前就注入 _account cookie，引导登录流程进入 Team workspace

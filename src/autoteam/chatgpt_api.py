@@ -8,8 +8,6 @@ import time
 import uuid
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
-
 import autoteam.display  # noqa: F401
 from autoteam.admin_state import (
     get_admin_session_token,
@@ -17,6 +15,7 @@ from autoteam.admin_state import (
     get_chatgpt_workspace_name,
     update_admin_state,
 )
+from autoteam.browser_runtime import USING_PATCHRIGHT, sync_playwright
 from autoteam.chatgpt_transport import build_chatgpt_transport
 from autoteam.config import get_playwright_launch_options
 from autoteam.textio import read_text
@@ -343,6 +342,12 @@ class ChatGPTTeamAPI:
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
             )
+            # 抹掉自动化痕迹，降低 Cloudflare Turnstile 的风控评分。
+            # patchright 已在内核层处理 webdriver，再手动注入反而引入新痕迹，故仅官方 playwright 时注入。
+            if not USING_PATCHRIGHT:
+                self.context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                )
             self.page = self.context.new_page()
         except Exception:
             self.stop()
@@ -361,11 +366,58 @@ class ChatGPTTeamAPI:
             body_excerpt,
         )
 
+    def _click_turnstile_checkbox(self):
+        """尝试点击 Cloudflare Turnstile 复选框。
+
+        Turnstile widget 在跨域 iframe（challenges.cloudflare.com）内，复选框还封在
+        closed shadow DOM 里，常规 selector 命中不了，因此回退到用 iframe 的屏幕坐标
+        做真实鼠标点击。返回是否执行了点击（不代表一定通过）。
+        """
+        # 优先尝试 frame_locator 穿透（少数 widget 是 open shadow，可直接命中）
+        try:
+            for frame in self.page.frames:
+                if "challenges.cloudflare.com" not in (frame.url or ""):
+                    continue
+                cb = frame.locator('input[type="checkbox"], label').first
+                if cb.is_visible(timeout=1000):
+                    cb.click()
+                    logger.info("[ChatGPT] 已通过 frame_locator 点击 Turnstile 复选框")
+                    return True
+        except Exception:
+            pass
+
+        # 回退：定位 CF iframe 元素 → 坐标级真实鼠标点击
+        try:
+            iframe_el = self.page.locator(
+                'iframe[src*="challenges.cloudflare.com"], '
+                'iframe[title*="Cloudflare" i], iframe[title*="challenge" i], '
+                'iframe[title*="人机" i]'
+            ).first
+            if iframe_el.is_visible(timeout=2000):
+                box = iframe_el.bounding_box()
+                if box:
+                    # Turnstile 复选框通常在 widget 左侧、垂直居中
+                    x = box["x"] + 28
+                    y = box["y"] + box["height"] / 2
+                    self.page.mouse.move(x, y, steps=8)  # 带轨迹移动，更像真人
+                    time.sleep(0.3)
+                    self.page.mouse.click(x, y)
+                    logger.info("[ChatGPT] 已对 Turnstile iframe 坐标点击 (%.0f, %.0f)", x, y)
+                    return True
+        except Exception as exc:
+            logger.debug("[ChatGPT] 点击 Turnstile 失败: %s", exc)
+
+        return False
+
     def _wait_for_cloudflare(self):
+        clicked = False
         for i in range(12):
             html = self.page.content()[:1000].lower()
             if "verify you are human" not in html and "challenge" not in self.page.url:
                 return
+            # 等一轮让 widget 渲染出来，再尝试点一次复选框
+            if not clicked and i >= 1:
+                clicked = self._click_turnstile_checkbox()
             logger.info("[ChatGPT] 等待 Cloudflare... (%ds)", i * 5)
             time.sleep(5)
 

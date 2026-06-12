@@ -1273,7 +1273,7 @@ def invite_to_team(chatgpt_api, email, seat_type="default"):
 
 def _complete_registration(email, password, invite_link, mail_client):
     """完成注册 + Codex 登录（从已有邀请链接继续）"""
-    from playwright.sync_api import sync_playwright
+    from autoteam.browser_runtime import sync_playwright
 
     from autoteam.invite import register_with_invite
 
@@ -1810,7 +1810,7 @@ def _register_direct_once(
     mail_client, email, password, mail_account_id=None, signup_profile: SignupProfile | None = None
 ):
     """执行一次直接注册，返回是否完成注册并进入 Team。"""
-    from playwright.sync_api import sync_playwright
+    from autoteam.browser_runtime import sync_playwright
 
     signup_profile = signup_profile or generate_signup_profile()
 

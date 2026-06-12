@@ -2,9 +2,7 @@ import os
 
 os.environ.setdefault("DISPLAY", ":99")
 
-import playwright.sync_api as playwright_sync_api
-
-from autoteam import codex_auth, invite, manager
+from autoteam import browser_runtime, codex_auth, invite, manager
 from autoteam.signup_profile import SignupProfile
 
 
@@ -243,7 +241,7 @@ def test_register_direct_once_fails_fast_when_email_step_hits_auth_error(monkeyp
         "_click_primary_auth_button",
         lambda page, field, labels: setattr(page, "url", "https://chatgpt.com/api/auth/error") or True,
     )
-    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(page))
+    monkeypatch.setattr(browser_runtime, "sync_playwright", lambda: _FakePlaywright(page))
 
     result = manager._register_direct_once(
         object(),
@@ -364,7 +362,7 @@ def test_complete_registration_reuses_one_profile_for_invite_and_oauth(monkeypat
     monkeypatch.setattr(manager, "save_auth_file", lambda bundle: "/tmp/auth.json")
     monkeypatch.setattr(manager, "update_account", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager, "_auth_repair_reset", lambda *args, **kwargs: None)
-    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(fake_page))
+    monkeypatch.setattr(browser_runtime, "sync_playwright", lambda: _FakePlaywright(fake_page))
 
     result = manager._complete_registration("user@example.com", "pw", "https://invite", object())
 
@@ -400,7 +398,7 @@ def test_complete_registration_releases_team_seat_and_returns_none_when_oauth_fa
         return {"status": "standby", "auth_last_error": "choose_account_selection", "seat_released": True}
 
     monkeypatch.setattr(manager, "_record_auth_repair_failure", fake_record)
-    monkeypatch.setattr(playwright_sync_api, "sync_playwright", lambda: _FakePlaywright(fake_page))
+    monkeypatch.setattr(browser_runtime, "sync_playwright", lambda: _FakePlaywright(fake_page))
 
     result = manager._complete_registration("user@example.com", "pw", "https://invite", object())
 
