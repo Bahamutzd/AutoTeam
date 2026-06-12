@@ -274,9 +274,11 @@ class ChatGPTTeamAPI:
 
         try:
             form = field.locator("xpath=ancestor::form[1]").first
-            btn = form.locator('button[type="submit"], input[type="submit"]').first
-            if _click_if_visible(btn):
-                return True
+            buttons = form.locator('button[type="submit"], input[type="submit"]').all()
+            for btn in buttons:
+                text = _button_text(btn)
+                if loose_re.search(text) and not _looks_like_social_auth(text) and _click_if_visible(btn):
+                    return True
         except Exception:
             pass
 
@@ -303,6 +305,33 @@ class ChatGPTTeamAPI:
                 text = _button_text(btn)
                 if loose_re.search(text) and not _looks_like_social_auth(text) and _click_if_visible(btn):
                     return True
+        except Exception:
+            pass
+
+        try:
+            clicked = self.page.evaluate(
+                """(labels) => {
+                    const visible = (el) => {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                    };
+                    const norm = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+                    const labelSet = new Set(labels.map((label) => label.toLowerCase()));
+                    const social = /(google|apple|phone|microsoft|sso)/i;
+                    const buttons = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'));
+                    const target = buttons.find((el) => {
+                        const text = norm(el.innerText || el.textContent || el.getAttribute('value') || el.getAttribute('aria-label'));
+                        return visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && labelSet.has(text.toLowerCase()) && !social.test(text);
+                    });
+                    if (!target) return false;
+                    target.click();
+                    return true;
+                }""",
+                labels,
+            )
+            if clicked:
+                return True
         except Exception:
             pass
 
@@ -1205,6 +1234,22 @@ class ChatGPTTeamAPI:
             email_input = self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=3000) or email_input
             try:
                 email_input.fill(email)
+                email_input.evaluate(
+                    """(el, value) => {
+                        const proto = el instanceof HTMLInputElement
+                            ? HTMLInputElement.prototype
+                            : HTMLTextAreaElement.prototype;
+                        const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+                        if (descriptor && descriptor.set) {
+                            descriptor.set.call(el, value);
+                        } else {
+                            el.value = value;
+                        }
+                        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    email,
+                )
             except Exception:
                 try:
                     email_input.click(timeout=1000)

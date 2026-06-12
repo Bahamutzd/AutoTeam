@@ -12,6 +12,16 @@ export function clearApiKey() {
   localStorage.removeItem('autoteam_api_key')
 }
 
+export function authorizedApiUrl(path) {
+  const normalizedPath = path.startsWith('/api/')
+    ? path
+    : `${BASE}${path.startsWith('/') ? path : `/${path}`}`
+  const key = getApiKey()
+  if (!key) return normalizedPath
+  const separator = normalizedPath.includes('?') ? '&' : '?'
+  return `${normalizedPath}${separator}key=${encodeURIComponent(key)}`
+}
+
 async function request(method, path, body = null) {
   const headers = { 'Content-Type': 'application/json' }
   const key = getApiKey()

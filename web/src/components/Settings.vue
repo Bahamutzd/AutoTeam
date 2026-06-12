@@ -217,7 +217,7 @@
             程序已尝试提交邮箱但页面仍停留在邮箱输入步骤。可能原因：按钮点击未生效、页面改版、网络延迟或风控拦截。
           </div>
           <div class="text-gray-500 text-xs">
-            建议：在弹出的 Playwright Chromium 窗口中手动完成邮箱步骤，然后点击下方「重新识别登录步骤」继续自动化流程；或使用「查看页面快照」和「AI 分析」辅助排障。
+            服务器部署通常看不到 Playwright 窗口。请先点「查看页面快照」确认页面状态，再点「重新识别登录步骤」；如果遇到人机验证，优先在本地浏览器登录后手动导入 session_token。
           </div>
         </div>
 
@@ -360,7 +360,7 @@
               <div><span class="text-gray-500">标题:</span> <span class="text-gray-300">{{ snapshot.title || '-' }}</span></div>
               <div><span class="text-gray-500">检测步骤:</span> <span class="text-gray-300">{{ snapshot.step || '-' }}</span></div>
               <div><span class="text-gray-500">截图:</span>
-                <a v-if="snapshot.screenshot" :href="`/api/screenshots/${snapshot.screenshot}`" target="_blank" class="text-blue-400 hover:underline">{{ snapshot.screenshot }}</a>
+                <a v-if="snapshot.screenshot" :href="screenshotUrl(snapshot.screenshot)" target="_blank" class="text-blue-400 hover:underline">{{ snapshot.screenshot }}</a>
                 <span v-else class="text-gray-500">无</span>
               </div>
             </div>
@@ -414,7 +414,7 @@
               <div v-for="(ss, idx) in screenshots" :key="'ss-'+idx" class="flex items-center justify-between gap-3 py-1">
                 <div class="flex items-center gap-2 min-w-0">
                   <span class="text-gray-600 shrink-0">#{{ idx + 1 }}</span>
-                  <a :href="ss.url" target="_blank" class="text-blue-400 hover:underline truncate">{{ ss.name }}</a>
+                  <a :href="screenshotUrl(ss)" target="_blank" class="text-blue-400 hover:underline truncate">{{ ss.name }}</a>
                   <span class="text-gray-600 shrink-0">{{ formatSize(ss.size) }}</span>
                 </div>
                 <span class="text-gray-600 shrink-0">{{ formatTime(ss.modified_at) }}</span>
@@ -566,7 +566,7 @@
 
 <script setup>
 import { computed, ref, watch, onMounted } from 'vue'
-import { api } from '../api.js'
+import { api, authorizedApiUrl } from '../api.js'
 
 const props = defineProps({
   adminStatus: {
@@ -851,6 +851,13 @@ function formatTime(ts) {
   if (!ts) return '-'
   const d = new Date(ts * 1000)
   return d.toLocaleString()
+}
+
+function screenshotUrl(item) {
+  const path = typeof item === 'string'
+    ? `/screenshots/${encodeURIComponent(item)}`
+    : item?.url || `/screenshots/${encodeURIComponent(item?.name || '')}`
+  return authorizedApiUrl(path)
 }
 
 async function logoutAdmin() {

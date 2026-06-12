@@ -1329,7 +1329,7 @@ def _local_admin_login_analysis(context: dict):
 
     if step == "email_required" and (url.endswith("/auth/login") or "/auth/login" in url):
         findings.append("当前仍处于邮箱步骤，URL 仍是 /auth/login，说明页面尚未推进到密码、验证码或 workspace。")
-        recommendations.append("先在弹出的 Playwright Chromium 窗口手动点击 Continue，再点“重新识别登录步骤”。")
+        recommendations.append("服务器部署通常看不到 Playwright 窗口；先在面板里打开页面快照确认按钮和输入框，再点“重新识别登录步骤”。")
 
     if any("clicked=False" in msg and "邮箱已提交" in msg for msg in log_messages):
         findings.append("日志显示邮箱提交时 clicked=False，程序没有确认点击到登录按钮，只是可能回退到按 Enter。")
@@ -1349,7 +1349,7 @@ def _local_admin_login_analysis(context: dict):
     ]
     if step == "email_required" and not visible_email_inputs:
         findings.append("当前判断为邮箱步骤，但 DOM 摘要里没有明显可见邮箱输入框，可能是页面 A/B 改版或输入框被包装。")
-        recommendations.append("用页面快照中的截图确认是否需要先展开其他登录方式。")
+        recommendations.append("用面板内页面快照确认是否需要展开邮箱登录入口；如果服务器无法交互，优先改用手动导入 session_token。")
 
     button_texts = [str(item.get("text") or item.get("ariaLabel") or "") for item in buttons if item.get("visible")]
     if button_texts and not any(text.strip().lower() in {"continue", "log in", "继续"} for text in button_texts):
@@ -1358,11 +1358,11 @@ def _local_admin_login_analysis(context: dict):
 
     if "verify you are human" in body or "cloudflare" in body or "challenge" in url:
         findings.append("页面内容或 URL 出现 Cloudflare/challenge 特征，登录可能被人机验证拦截。")
-        recommendations.append("手动完成验证后再点“重新识别登录步骤”。")
+        recommendations.append("服务器无桌面时无法直接点验证；优先在本地浏览器登录后导入 session_token，或给服务器配置 VNC/noVNC 后再人工处理。")
 
     if "continue with google" in body and "continue chatgpt" in body and step == "email_required":
         findings.append("body 仍是登录首页文案，页面没有进入下一个认证表单。")
-        recommendations.append("如果截图显示只有第三方登录入口，说明邮箱登录入口可能被页面实验隐藏，需要手动展开或调整选择器。")
+        recommendations.append("如果快照显示有 Email address 和 Continue，后端会自动重试填写并点击；如果只有第三方入口，优先导入 session_token。")
 
     if step in {"password_required", "code_required", "workspace_required", "completed"}:
         findings.append(f"当前已推进到 {step}，不是邮箱提交卡住。")
