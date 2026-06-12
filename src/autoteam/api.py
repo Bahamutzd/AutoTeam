@@ -1,17 +1,23 @@
 """AutoTeam HTTP API - 将 CLI 功能暴露为 HTTP 接口"""
 
+import asyncio
+import base64
+import binascii
+import contextlib
 import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1308,6 +1314,85 @@ def _list_screenshots(limit: int = 60):
     return files[: max(1, min(limit, 200))]
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _desktop_enabled() -> bool:
+    return _env_bool("ENABLE_NOVNC", True)
+
+
+def _desktop_vnc_host() -> str:
+    return os.environ.get("VNC_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+
+def _desktop_vnc_port() -> int:
+    return _env_int("VNC_PORT", 5900)
+
+
+def _novnc_web_dir() -> Path:
+    return Path(os.environ.get("NOVNC_WEB_DIR", "/usr/share/novnc")).expanduser()
+
+
+def _request_api_token(request: Request) -> str:
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]
+    return request.query_params.get("key", "")
+
+
+def _encode_desktop_token(token: str) -> str:
+    encoded = base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
+    return encoded.rstrip("=")
+
+
+def _decode_desktop_token(token: str) -> str:
+    if not token:
+        return ""
+    padding = "=" * (-len(token) % 4)
+    try:
+        return base64.urlsafe_b64decode(f"{token}{padding}").decode("utf-8")
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _desktop_url_for_request(request: Request) -> str:
+    ws_path = "/api/desktop/ws"
+    token = _request_api_token(request)
+    if API_KEY and token:
+        ws_path = f"{ws_path}/{quote(_encode_desktop_token(token), safe='')}"
+    params = urlencode(
+        {
+            "autoconnect": "true",
+            "resize": "remote",
+            "reconnect": "true",
+            "path": ws_path.lstrip("/"),
+        }
+    )
+    return f"/desktop/vnc.html?{params}"
+
+
+def _vnc_ready(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
 def _recent_login_logs(limit: int = 80):
     entries = globals().get("_log_buffer", [])[-limit:]
     keywords = ("[ChatGPT]", "[Codex]", "管理员登录", "admin-login", "login", "OAuth")
@@ -1512,6 +1597,137 @@ def get_screenshots(limit: int = 60):
 def get_screenshot(filename: str):
     """读取 screenshots/ 目录下的单个截图。"""
     return FileResponse(str(_screenshot_path(filename)))
+
+
+@app.get("/api/desktop/status")
+def get_desktop_status(request: Request):
+    """返回服务器端 Playwright 远程窗口入口。"""
+    configured = _desktop_enabled()
+    web_dir = _novnc_web_dir()
+    web_available = (web_dir / "vnc.html").is_file()
+    public_url = os.environ.get("NOVNC_PUBLIC_URL", "").strip()
+    host = _desktop_vnc_host()
+    port = _desktop_vnc_port()
+    vnc_ready = _vnc_ready(host, port) if configured else False
+    embedded_url = _desktop_url_for_request(request) if web_available else ""
+    enabled = configured and (web_available or bool(public_url))
+
+    if not configured:
+        detail = "远程浏览器窗口未启用，可设置 ENABLE_NOVNC=true 后重启服务"
+    elif not (web_available or public_url):
+        detail = f"未找到 noVNC 页面目录: {web_dir}"
+    elif not vnc_ready:
+        detail = "远程窗口服务正在启动或不可达，稍后重试"
+    else:
+        detail = "远程窗口可用"
+
+    return {
+        "enabled": enabled,
+        "configured": configured,
+        "display": os.environ.get("DISPLAY", ":99"),
+        "web_available": web_available,
+        "web_dir": str(web_dir),
+        "vnc_ready": vnc_ready,
+        "vnc_host": host,
+        "vnc_port": port,
+        "url": public_url or embedded_url,
+        "embedded_url": embedded_url,
+        "public_url": public_url,
+        "password_required": bool(os.environ.get("NOVNC_PASSWORD")),
+        "detail": detail,
+    }
+
+
+async def _accept_desktop_websocket(websocket: WebSocket, encoded_token: str = "") -> bool:
+    if not API_KEY:
+        await websocket.accept(subprotocol=_desktop_websocket_subprotocol(websocket))
+        return True
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = _decode_desktop_token(encoded_token) or websocket.query_params.get("key", "")
+    if token != API_KEY:
+        await websocket.close(code=1008, reason="未授权")
+        return False
+    await websocket.accept(subprotocol=_desktop_websocket_subprotocol(websocket))
+    return True
+
+
+def _desktop_websocket_subprotocol(websocket: WebSocket) -> str | None:
+    protocols = websocket.headers.get("sec-websocket-protocol", "")
+    requested = {item.strip() for item in protocols.split(",") if item.strip()}
+    return "binary" if "binary" in requested else None
+
+
+async def _pipe_vnc_to_websocket(reader: asyncio.StreamReader, websocket: WebSocket):
+    while True:
+        data = await reader.read(65536)
+        if not data:
+            return
+        await websocket.send_bytes(data)
+
+
+async def _pipe_websocket_to_vnc(websocket: WebSocket, writer: asyncio.StreamWriter):
+    while True:
+        message = await websocket.receive()
+        if message.get("type") == "websocket.disconnect":
+            return
+        if message.get("bytes") is not None:
+            writer.write(message["bytes"])
+        elif message.get("text") is not None:
+            writer.write(message["text"].encode("latin-1"))
+        else:
+            continue
+        await writer.drain()
+
+
+async def _desktop_websocket_proxy(websocket: WebSocket, encoded_token: str = ""):
+    """把 noVNC WebSocket 流量桥接到容器内 x11vnc。"""
+    if not await _accept_desktop_websocket(websocket, encoded_token):
+        return
+    if not _desktop_enabled():
+        await websocket.close(code=1013, reason="远程窗口未启用")
+        return
+
+    host = _desktop_vnc_host()
+    port = _desktop_vnc_port()
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except OSError as exc:
+        logger.warning("[API] 远程窗口 VNC 服务不可达: %s:%s, %s", host, port, exc)
+        await websocket.close(code=1013, reason="VNC 服务未就绪")
+        return
+
+    tasks = {
+        asyncio.create_task(_pipe_vnc_to_websocket(reader, websocket)),
+        asyncio.create_task(_pipe_websocket_to_vnc(websocket, writer)),
+    }
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            with contextlib.suppress(WebSocketDisconnect, ConnectionError, OSError, asyncio.CancelledError):
+                task.result()
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+        with contextlib.suppress(Exception):
+            await websocket.close()
+
+
+@app.websocket("/api/desktop/ws")
+async def desktop_websocket(websocket: WebSocket):
+    await _desktop_websocket_proxy(websocket)
+
+
+@app.websocket("/api/desktop/ws/{encoded_token}")
+async def desktop_websocket_with_token(websocket: WebSocket, encoded_token: str):
+    await _desktop_websocket_proxy(websocket, encoded_token)
 
 
 @app.post("/api/admin/login/inspect")
@@ -3642,6 +3858,10 @@ def restore_backup(payload: dict | None = None):
 # ---------------------------------------------------------------------------
 # 前端静态文件
 # ---------------------------------------------------------------------------
+
+NOVNC_WEB_DIR = _novnc_web_dir()
+if (NOVNC_WEB_DIR / "vnc.html").is_file():
+    app.mount("/desktop", StaticFiles(directory=str(NOVNC_WEB_DIR), html=True), name="desktop")
 
 DIST_DIR = Path(__file__).parent / "web" / "dist"
 

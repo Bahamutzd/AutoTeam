@@ -61,6 +61,7 @@ export const api = {
   getAdminStatus: () => request('GET', '/admin/status'),
   getMainCodexStatus: () => request('GET', '/main-codex/status'),
   getManualAccountStatus: () => request('GET', '/manual-account/status'),
+  getDesktopStatus: () => request('GET', '/desktop/status'),
   getAccounts: () => request('GET', '/accounts'),
   getActiveAccounts: () => request('GET', '/accounts/active'),
   getStandbyAccounts: () => request('GET', '/accounts/standby'),

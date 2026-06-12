@@ -217,7 +217,7 @@
             程序已尝试提交邮箱但页面仍停留在邮箱输入步骤。可能原因：按钮点击未生效、页面改版、网络延迟或风控拦截。
           </div>
           <div class="text-gray-500 text-xs">
-            服务器部署通常看不到 Playwright 窗口。请先点「查看页面快照」确认页面状态，再点「重新识别登录步骤」；如果遇到人机验证，优先在本地浏览器登录后手动导入 session_token。
+            服务器部署可先点「打开远程浏览器窗口」直接接管 Playwright Chromium；操作后再点「重新识别登录步骤」。如果远程窗口不可用，再用「查看页面快照」确认页面状态。
           </div>
         </div>
 
@@ -347,6 +347,35 @@
             >
               {{ screenshotsLoading ? '加载中...' : '查看截图列表' }}
             </button>
+            <button
+              @click="openDesktop"
+              :disabled="desktopLoading"
+              class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
+              :class="desktopLoading
+                ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                : 'bg-sky-600/10 text-sky-400 border-sky-500/30 hover:bg-sky-600/20'"
+            >
+              {{ desktopLoading ? '打开中...' : '打开远程浏览器窗口' }}
+            </button>
+          </div>
+
+          <div v-if="desktopStatus" class="mb-3 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-100">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <span class="text-sky-300">远程窗口:</span>
+                <span class="text-gray-300">{{ desktopStatus.detail || (desktopStatus.enabled ? '可用' : '不可用') }}</span>
+                <span v-if="desktopStatus.display" class="ml-2 text-gray-500">DISPLAY={{ desktopStatus.display }}</span>
+              </div>
+              <a
+                v-if="desktopStatus.url"
+                :href="desktopStatus.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-sky-300 hover:underline"
+              >
+                重新打开
+              </a>
+            </div>
           </div>
 
           <!-- 页面快照结果 -->
@@ -612,9 +641,11 @@ const inspecting = ref(false)
 const refreshing = ref(false)
 const analyzing = ref(false)
 const screenshotsLoading = ref(false)
+const desktopLoading = ref(false)
 const snapshot = ref(null)
 const analysis = ref(null)
 const screenshots = ref(null)
+const desktopStatus = ref(null)
 
 const adminConfigured = computed(() => !!props.adminStatus?.configured)
 const adminBusy = computed(() => !!props.adminStatus?.login_in_progress)
@@ -779,6 +810,7 @@ async function cancelLogin() {
     snapshot.value = null
     analysis.value = null
     screenshots.value = null
+    desktopStatus.value = null
     setMessage('管理员登录已取消')
     emit('refresh')
   } catch (e) {
@@ -837,6 +869,26 @@ async function loadScreenshots() {
     setMessage('加载截图列表失败: ' + e.message, 'error')
   } finally {
     screenshotsLoading.value = false
+  }
+}
+
+async function openDesktop() {
+  desktopLoading.value = true
+  try {
+    const result = await api.getDesktopStatus()
+    desktopStatus.value = result
+    if (!result.enabled || !result.url) {
+      setMessage(result.detail || '远程浏览器窗口未启用', 'error')
+      return
+    }
+    if (!result.vnc_ready) {
+      setMessage(result.detail || '远程窗口服务还未就绪，已尝试打开页面', 'error')
+    }
+    window.open(result.url, '_blank', 'noopener,noreferrer')
+  } catch (e) {
+    setMessage('打开远程浏览器窗口失败: ' + e.message, 'error')
+  } finally {
+    desktopLoading.value = false
   }
 }
 
