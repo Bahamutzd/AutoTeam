@@ -956,6 +956,9 @@ class _PlaywrightExecutor:
 _pw_executor = _PlaywrightExecutor()
 
 
+ADMIN_LOGIN_START_TIMEOUT_SECONDS = 600
+
+
 def _stop_playwright_resource(resource):
     if not resource:
         return
@@ -1207,6 +1210,8 @@ def _admin_status():
     status = get_admin_state_summary()
     status["login_step"] = _admin_login_step
     status["login_in_progress"] = _admin_login_api is not None
+    if _admin_login_api:
+        status["login_email"] = getattr(_admin_login_api, "login_email", "") or status.get("email", "")
     if _admin_login_api and _admin_login_step == "workspace_required":
         status["workspace_options"] = getattr(_admin_login_api, "workspace_options_cache", []) or []
     else:
@@ -1628,14 +1633,26 @@ def post_admin_login_start(params: AdminEmailParams):
     try:
         from autoteam.chatgpt_api import ChatGPTTeamAPI
 
-        logger.info("[API] 开始管理员登录: %s", params.email.strip())
+        login_email = params.email.strip()
+        logger.info("[API] 开始管理员登录: %s", login_email)
+
+        api = ChatGPTTeamAPI()
+        api.login_email = login_email
+        _admin_login_api = api
+        _admin_login_step = "starting"
 
         def _do_start(email):
-            return _run_playwright_start(
-                ChatGPTTeamAPI, lambda api, login_email: api.begin_admin_login(login_email), email
-            )
+            try:
+                return api.begin_admin_login(email)
+            except Exception:
+                _stop_playwright_resource(api)
+                raise
 
-        api, result = _pw_executor.run(_do_start, params.email.strip())
+        result = _pw_executor.run(
+            _do_start,
+            login_email,
+            timeout_seconds=ADMIN_LOGIN_START_TIMEOUT_SECONDS,
+        )
         step = result["step"]
         logger.info("[API] 管理员登录 start 返回: step=%s detail=%s", step, result.get("detail"))
         if step == "completed":
@@ -1644,12 +1661,16 @@ def post_admin_login_start(params: AdminEmailParams):
         if step in ("email_required", "password_required", "code_required", "workspace_required"):
             return _set_pending_admin_login(api, step)
         _pw_executor.run(api.stop)
+        _admin_login_api = None
+        _admin_login_step = None
         _playwright_lock.release()
         raise HTTPException(status_code=400, detail=result.get("detail") or "无法识别管理员登录步骤")
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("[API] 管理员登录 start 失败")
+        _admin_login_api = None
+        _admin_login_step = None
         if _playwright_lock.locked():
             _playwright_lock.release()
         raise HTTPException(status_code=400, detail=str(exc))
@@ -3077,8 +3098,8 @@ def _auto_check_loop():
 
         cpa_missing_accounts: list[dict] = []
         try:
+            from autoteam.config import CPA_KEY, CPA_URL
             from autoteam.cpa_sync import list_cpa_files
-            from autoteam.config import CPA_URL, CPA_KEY
 
             if CPA_URL and CPA_KEY:
                 cpa_files = list_cpa_files()
@@ -3177,8 +3198,8 @@ def _auto_check_loop():
                         failed += 1
                         continue
                     try:
-                        from autoteam.cpa_sync import upload_to_cpa, patch_cpa_priority
                         from autoteam.accounts import compute_cpa_priority
+                        from autoteam.cpa_sync import patch_cpa_priority, upload_to_cpa
 
                         if upload_to_cpa(auth_file):
                             priority = compute_cpa_priority(acc)

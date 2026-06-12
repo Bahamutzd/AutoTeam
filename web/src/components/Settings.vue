@@ -159,6 +159,13 @@
 
         <div v-else-if="!codexBusy" class="flex flex-wrap gap-3">
           <button
+            @click="startLogin"
+            :disabled="submitting || syncingMain || deletingMainRemoteFiles || !email"
+            class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition disabled:opacity-50"
+          >
+            {{ submitting ? '打开中...' : '重新登录管理员' }}
+          </button>
+          <button
             @click="loginMainCodex"
             :disabled="submitting || syncingMain || deletingMainRemoteFiles"
             class="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white text-sm rounded-lg transition disabled:opacity-50"
@@ -191,10 +198,20 @@
 
       <div v-if="adminBusy" class="space-y-4">
         <div class="text-sm text-gray-300">
-          当前邮箱: <span class="font-mono">{{ loginEmail || props.adminStatus?.email || '-' }}</span>
+          当前邮箱: <span class="font-mono">{{ loginEmail || props.adminStatus?.login_email || props.adminStatus?.email || '-' }}</span>
         </div>
 
-        <div v-if="props.adminStatus?.login_step === 'email_required'" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-sm space-y-2">
+        <div v-if="props.adminStatus?.login_step === 'starting'" class="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 text-sm space-y-2">
+          <div class="text-blue-300 font-medium">正在打开管理员登录页</div>
+          <div class="text-gray-400 text-xs leading-relaxed">
+            后端已经接管 Playwright 浏览器，正在等待 ChatGPT 登录页加载和步骤识别。页面较慢或触发风控时可能需要几分钟。
+          </div>
+          <div class="text-gray-500 text-xs">
+            如果浏览器窗口已经可操作，可以手动完成当前步骤；待状态推进后再点击「重新识别登录步骤」。
+          </div>
+        </div>
+
+        <div v-else-if="props.adminStatus?.login_step === 'email_required'" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-sm space-y-2">
           <div class="text-amber-300 font-medium">邮箱提交后页面未推进</div>
           <div class="text-gray-400 text-xs leading-relaxed">
             程序已尝试提交邮箱但页面仍停留在邮箱输入步骤。可能原因：按钮点击未生效、页面改版、网络延迟或风控拦截。
@@ -678,7 +695,9 @@ async function startLogin() {
   adminSubmittingHint.value = '正在打开管理员登录页...'
   try {
     loginEmail.value = email.value
-    const result = await api.startAdminLogin(email.value)
+    const startPromise = api.startAdminLogin(email.value)
+    emit('admin-progress')
+    const result = await startPromise
     setMessage(result.status === 'completed' ? '管理员登录完成' : '已进入下一步登录流程')
     emit('admin-progress')
   } catch (e) {

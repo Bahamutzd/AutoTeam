@@ -58,7 +58,7 @@ def test_post_admin_login_start_stops_api_when_begin_login_fails(monkeypatch):
     monkeypatch.setattr(api, "_playwright_lock", threading.Lock())
     monkeypatch.setattr(api, "_admin_login_api", None)
     monkeypatch.setattr(api, "_admin_login_step", None)
-    monkeypatch.setattr(api._pw_executor, "run", lambda func, *args, **kwargs: func(*args, **kwargs))
+    monkeypatch.setattr(api._pw_executor, "run", lambda func, *args, **_kwargs: func(*args))
     monkeypatch.setattr("autoteam.chatgpt_api.ChatGPTTeamAPI", FakeChatGPTTeamAPI)
 
     with pytest.raises(api.HTTPException) as exc:
@@ -70,6 +70,39 @@ def test_post_admin_login_start_stops_api_when_begin_login_fails(monkeypatch):
     assert instances[0].stopped is True
     assert api._admin_login_api is None
     assert api._playwright_lock.locked() is False
+
+
+def test_post_admin_login_start_marks_pending_while_starting(monkeypatch):
+    class FakeChatGPTTeamAPI:
+        def __init__(self):
+            self.login_email = None
+
+        def begin_admin_login(self, email):
+            assert api._admin_login_api is self
+            assert api._admin_login_step == "starting"
+            assert self.login_email == email
+            return {"step": "email_required", "detail": "manual takeover"}
+
+        def stop(self):
+            pass
+
+    def fake_run(func, *args, **kwargs):
+        assert kwargs.get("timeout_seconds") == api.ADMIN_LOGIN_START_TIMEOUT_SECONDS
+        return func(*args)
+
+    monkeypatch.setattr(api, "_playwright_lock", threading.Lock())
+    monkeypatch.setattr(api, "_admin_login_api", None)
+    monkeypatch.setattr(api, "_admin_login_step", None)
+    monkeypatch.setattr(api._pw_executor, "run", fake_run)
+    monkeypatch.setattr("autoteam.chatgpt_api.ChatGPTTeamAPI", FakeChatGPTTeamAPI)
+
+    result = api.post_admin_login_start(api.AdminEmailParams(email="admin@example.com"))
+
+    assert result["status"] == "email_required"
+    assert result["admin"]["login_in_progress"] is True
+    assert result["admin"]["login_step"] == "email_required"
+    assert result["admin"]["login_email"] == "admin@example.com"
+    assert api._playwright_lock.locked() is True
 
 
 def test_get_team_members_stops_chatgpt_when_start_fails(monkeypatch):
