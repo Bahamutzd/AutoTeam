@@ -71,6 +71,85 @@ def test_select_workspace_option_shortcuts_completed_when_chatgpt_home_loaded(mo
     assert client.select_workspace_option(0) == {"step": "completed", "detail": None}
 
 
+def test_login_page_url_detection_accepts_openai_auth_and_chatgpt():
+    assert chatgpt_api._is_login_page_url("https://auth.openai.com/log-in")
+    assert chatgpt_api._is_login_page_url("https://auth.openai.com/u/login/identifier")
+    assert chatgpt_api._is_login_page_url("https://chatgpt.com/auth/login")
+
+
+def test_open_login_page_uses_openai_auth_when_email_input_visible(monkeypatch):
+    class FakeLoginButton:
+        @property
+        def first(self):
+            return self
+
+        def is_visible(self, timeout=None):
+            return False
+
+    class FakePage:
+        def __init__(self):
+            self.url = ""
+            self.visited = []
+
+        def goto(self, url, *_args, **_kwargs):
+            self.url = url
+            self.visited.append(url)
+
+        def locator(self, *_args, **_kwargs):
+            return FakeLoginButton()
+
+    client = chatgpt_api.ChatGPTTeamAPI()
+    client.page = FakePage()
+
+    monkeypatch.setattr(chatgpt_api.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client, "_wait_for_cloudflare", lambda: None)
+    monkeypatch.setattr(client, "_log_login_state", lambda _label: None)
+    monkeypatch.setattr(client, "_wait_for_login_step", lambda _steps, timeout=4: ("email_required", None))
+    monkeypatch.setattr(client, "_visible_locator_in_frames", lambda _selectors, timeout_ms=1500: object())
+
+    selected = client._open_login_page()
+
+    assert selected == "https://auth.openai.com/log-in"
+    assert client.page.visited == ["https://auth.openai.com/log-in"]
+
+
+def test_open_login_page_falls_back_to_chatgpt_login_when_auth_email_missing(monkeypatch):
+    class FakeLoginButton:
+        @property
+        def first(self):
+            return self
+
+        def is_visible(self, timeout=None):
+            return False
+
+    class FakePage:
+        def __init__(self):
+            self.url = ""
+            self.visited = []
+
+        def goto(self, url, *_args, **_kwargs):
+            self.url = url
+            self.visited.append(url)
+
+        def locator(self, *_args, **_kwargs):
+            return FakeLoginButton()
+
+    client = chatgpt_api.ChatGPTTeamAPI()
+    client.page = FakePage()
+    email_inputs = iter([None, object()])
+
+    monkeypatch.setattr(chatgpt_api.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client, "_wait_for_cloudflare", lambda: None)
+    monkeypatch.setattr(client, "_log_login_state", lambda _label: None)
+    monkeypatch.setattr(client, "_wait_for_login_step", lambda _steps, timeout=4: ("email_required", None))
+    monkeypatch.setattr(client, "_visible_locator_in_frames", lambda _selectors, timeout_ms=1500: next(email_inputs))
+
+    selected = client._open_login_page()
+
+    assert selected == "https://chatgpt.com/auth/login"
+    assert client.page.visited == ["https://auth.openai.com/log-in", "https://chatgpt.com/auth/login"]
+
+
 def test_begin_login_keeps_auth_login_page_for_manual_takeover(monkeypatch, tmp_path):
     class FakeLocator:
         def inner_text(self, timeout=None):

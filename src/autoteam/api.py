@@ -1420,8 +1420,13 @@ def _local_admin_login_analysis(context: dict):
     findings = []
     recommendations = []
 
-    if step == "email_required" and (url.endswith("/auth/login") or "/auth/login" in url):
-        findings.append("当前仍处于邮箱步骤，URL 仍是 /auth/login，说明页面尚未推进到密码、验证码或 workspace。")
+    if step == "email_required" and (
+        url.endswith("/auth/login")
+        or "/auth/login" in url
+        or "auth.openai.com/log-in" in url
+        or "auth.openai.com/u/login" in url
+    ):
+        findings.append("当前仍处于邮箱步骤，URL 仍是登录页，说明页面尚未推进到密码、验证码或 workspace。")
         recommendations.append("服务器部署通常看不到 Playwright 窗口；先在面板里打开页面快照确认按钮和输入框，再点“重新识别登录步骤”。")
 
     if any("clicked=False" in msg and "邮箱已提交" in msg for msg in log_messages):

@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 BASE_DIR = PROJECT_ROOT
 SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
+LOGIN_PAGE_URLS = (
+    "https://auth.openai.com/log-in",
+    "https://chatgpt.com/auth/login",
+)
+LOGIN_URL_MARKERS = (
+    "auth.openai.com/log-in",
+    "auth.openai.com/u/login",
+    "log-in-or-create-account",
+    "/auth/login",
+)
 
 _WORKSPACE_IGNORE_LABELS = {
     "choose a workspace",
@@ -69,6 +79,11 @@ def _workspace_candidate_kind(text):
     if any(key in text_l for key in _WORKSPACE_FALLBACK_LABELS):
         return "fallback"
     return "preferred"
+
+
+def _is_login_page_url(url):
+    url = (url or "").lower()
+    return any(marker in url for marker in LOGIN_URL_MARKERS)
 
 
 class ChatGPTTeamAPI:
@@ -829,19 +844,61 @@ class ChatGPTTeamAPI:
         self._auto_detect_workspace()
 
     def _open_login_page(self):
-        self.page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
-        self._wait_for_cloudflare()
-        self._log_login_state("打开登录页后")
+        accepted_url = LOGIN_PAGE_URLS[-1]
+        allowed_steps = {
+            "email_required",
+            "password_required",
+            "code_required",
+            "workspace_required",
+            "completed",
+            "error",
+        }
 
-        try:
-            login_btn = self.page.locator('button:has-text("登录"), button:has-text("Log in")').first
-            if login_btn.is_visible(timeout=3000):
-                login_btn.click()
-                time.sleep(2)
-                self._log_login_state("点击登录按钮后")
-        except Exception:
-            pass
+        for index, login_url in enumerate(LOGIN_PAGE_URLS, start=1):
+            self.page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+            accepted_url = login_url
+            time.sleep(5)
+            self._wait_for_cloudflare()
+            self._log_login_state(f"打开登录页后（{index}/{len(LOGIN_PAGE_URLS)}）")
+
+            try:
+                login_btn = self.page.locator('button:has-text("登录"), button:has-text("Log in")').first
+                if login_btn.is_visible(timeout=3000):
+                    login_btn.click()
+                    time.sleep(2)
+                    self._log_login_state("点击登录按钮后")
+            except Exception:
+                pass
+
+            step, detail = self._wait_for_login_step(allowed_steps, timeout=4)
+            if step == "email_required" and not self._visible_locator_in_frames(
+                self.EMAIL_INPUT_SELECTORS, timeout_ms=1500
+            ):
+                if index < len(LOGIN_PAGE_URLS):
+                    logger.warning(
+                        "[ChatGPT] 登录页未出现邮箱输入框，尝试备用登录页 | URL=%s | detail=%s",
+                        self.page.url,
+                        detail,
+                    )
+                    continue
+
+            if step in allowed_steps:
+                logger.info(
+                    "[ChatGPT] 登录页候选可用: %s | step=%s | current_url=%s",
+                    login_url,
+                    step,
+                    self.page.url,
+                )
+                break
+
+            if index < len(LOGIN_PAGE_URLS):
+                logger.warning(
+                    "[ChatGPT] 登录页候选未识别，尝试备用登录页 | URL=%s | detail=%s",
+                    self.page.url,
+                    detail,
+                )
+
+        return accepted_url
 
     def _list_workspace_options(self):
         if not self._is_workspace_selection_page():
@@ -1169,7 +1226,7 @@ class ChatGPTTeamAPI:
             return "email_required", None
 
         url = (self.page.url or "").lower()
-        if "log-in-or-create-account" in url or url.endswith("/auth/login"):
+        if _is_login_page_url(url):
             logger.info("[ChatGPT] 登录步骤检测: email_required(url) | URL=%s", self.page.url)
             return "email_required", None
 
@@ -1220,7 +1277,7 @@ class ChatGPTTeamAPI:
                 pass
             current_url = self.page.url or ""
             lower_url = current_url.lower()
-            if "log-in-or-create-account" in lower_url or "/auth/login" in lower_url:
+            if _is_login_page_url(lower_url):
                 detail = (
                     f"{actor_label}登录页未找到可见邮箱输入框，可在浏览器窗口手动接管后重新识别。"
                     f" 当前 URL: {current_url}，页面片段: {body_excerpt}"
