@@ -1189,6 +1189,15 @@ class ChatGPTTeamAPI:
                 body_excerpt = self.page.locator("body").inner_text(timeout=2000)[:300]
             except Exception:
                 pass
+            current_url = self.page.url or ""
+            lower_url = current_url.lower()
+            if "log-in-or-create-account" in lower_url or "/auth/login" in lower_url:
+                detail = (
+                    f"{actor_label}登录页未找到可见邮箱输入框，可在浏览器窗口手动接管后重新识别。"
+                    f" 当前 URL: {current_url}，页面片段: {body_excerpt}"
+                )
+                logger.warning("[ChatGPT] %s", detail)
+                return {"step": "email_required", "detail": detail}
             raise RuntimeError(f"未找到{actor_label}邮箱输入框，当前 URL: {self.page.url}，页面片段: {body_excerpt}")
 
         final_step, final_detail = "unknown", self.page.url

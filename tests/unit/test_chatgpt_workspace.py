@@ -69,3 +69,39 @@ def test_select_workspace_option_shortcuts_completed_when_chatgpt_home_loaded(mo
     )
 
     assert client.select_workspace_option(0) == {"step": "completed", "detail": None}
+
+
+def test_begin_login_keeps_auth_login_page_for_manual_takeover(monkeypatch, tmp_path):
+    class FakeLocator:
+        def inner_text(self, timeout=None):
+            return ""
+
+    class FakePage:
+        url = "https://chatgpt.com/auth/login"
+
+        def goto(self, *_args, **_kwargs):
+            return None
+
+        def locator(self, *_args, **_kwargs):
+            return FakeLocator()
+
+        def screenshot(self, path=None, full_page=None):
+            return None
+
+    client = chatgpt_api.ChatGPTTeamAPI()
+    client.browser = object()
+    client.page = FakePage()
+
+    monkeypatch.setattr(chatgpt_api, "SCREENSHOT_DIR", tmp_path)
+    monkeypatch.setattr(chatgpt_api.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client, "_wait_for_cloudflare", lambda: None)
+    monkeypatch.setattr(client, "_log_login_state", lambda _label: None)
+    monkeypatch.setattr(client, "_open_login_page", lambda: None)
+    monkeypatch.setattr(client, "_wait_for_login_step", lambda _steps, timeout=12: ("email_required", None))
+    monkeypatch.setattr(client, "_visible_locator_in_frames", lambda _selectors, timeout_ms=5000: None)
+
+    result = client.begin_login("admin@example.com", actor_label="管理员")
+
+    assert result["step"] == "email_required"
+    assert "未找到可见邮箱输入框" in result["detail"]
+    assert "手动接管" in result["detail"]
