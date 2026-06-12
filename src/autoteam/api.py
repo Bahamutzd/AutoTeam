@@ -1305,7 +1305,7 @@ def _list_screenshots(limit: int = 60):
 
 def _recent_login_logs(limit: int = 80):
     entries = globals().get("_log_buffer", [])[-limit:]
-    keywords = ("[ChatGPT]", "管理员登录", "admin-login", "login")
+    keywords = ("[ChatGPT]", "[Codex]", "管理员登录", "admin-login", "login", "OAuth")
     return [entry for entry in entries if any(key in entry.get("message", "") for key in keywords)]
 
 

@@ -274,6 +274,22 @@ def _is_google_redirect(page):
         return False
 
 
+def _is_chatgpt_logged_in(page):
+    """检查 ChatGPT 页面是否已成功登录（不在 auth/login 页面）。"""
+    url = (page.url or "").lower()
+    if "chatgpt.com" not in url:
+        return False
+    if "auth" in url or "login" in url:
+        return False
+    try:
+        body = page.locator("body").inner_text(timeout=1500).lower()
+        if "log in" in body[:200] and "chatgpt" in body[:200]:
+            return False
+    except Exception:
+        pass
+    return True
+
+
 _OTP_INPUT_SELECTORS = (
     'input[name="code"], input[inputmode="numeric"], input[autocomplete="one-time-code"], '
     'input[placeholder*="验证码"], input[placeholder*="code" i]'
@@ -958,6 +974,7 @@ def login_codex_via_browser(
             pass
 
         # 输入邮箱（避免误点 Google/Microsoft 第三方登录按钮）
+        email_submitted = False
         try:
             ei = _page.locator('input[name="email"], input[id="email-input"], input[id="email"]').first
             if ei.is_visible(timeout=5000):
@@ -965,11 +982,13 @@ def login_codex_via_browser(
                 time.sleep(0.5)
                 clicked = _click_primary_auth_button(_page, ei, ["Continue", "继续"])
                 logger.info("[Codex] ChatGPT 邮箱已提交 | clicked=%s", clicked)
+                email_submitted = clicked
                 time.sleep(3)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[Codex] ChatGPT 邮箱步骤异常: %s", exc)
 
         # 输入密码 / 点击一次性验证码登录
+        password_submitted = False
         try:
             pi = _page.locator('input[type="password"]').first
             if pi.is_visible(timeout=5000):
@@ -978,6 +997,7 @@ def login_codex_via_browser(
                     time.sleep(0.5)
                     clicked = _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
                     logger.info("[Codex] ChatGPT 密码已提交 | clicked=%s", clicked)
+                    password_submitted = clicked
                 else:
                     # 没有密码，点击"使用一次性验证码登录"
                     otp_btn = _page.locator(
@@ -986,13 +1006,15 @@ def login_codex_via_browser(
                     if otp_btn.is_visible(timeout=3000):
                         logger.info("[Codex] 无密码，点击一次性验证码登录")
                         otp_btn.click()
+                        password_submitted = True
                     else:
                         # fallback: 提交空密码让页面报错，然后找验证码按钮
                         clicked = _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
                         logger.info("[Codex] ChatGPT 空密码已提交（fallback）| clicked=%s", clicked)
+                        password_submitted = clicked
                 time.sleep(8)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[Codex] ChatGPT 密码步骤异常: %s", exc)
 
         # 可能需要邮箱验证码
         try:
@@ -1005,11 +1027,22 @@ def login_codex_via_browser(
                     used_email_ids=_used_email_ids,
                     wait_log="[Codex] ChatGPT 登录需要验证码，等待 emailId > %d 的新邮件...",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("[Codex] ChatGPT 验证码步骤异常: %s", exc)
 
         _screenshot(_page, "codex_00_chatgpt_login.png")
         logger.info("[Codex] ChatGPT 登录后 URL: %s", _page.url)
+
+        # 验证 ChatGPT 登录是否成功
+        _chatgpt_login_ok = _is_chatgpt_logged_in(_page)
+        if not _chatgpt_login_ok:
+            logger.warning(
+                "[Codex] ChatGPT 登录可能未完成 | URL=%s | email_submitted=%s | password_submitted=%s",
+                _page.url,
+                email_submitted,
+                password_submitted,
+            )
+            _screenshot(_page, "codex_00_chatgpt_login_failed.png")
 
         # 如果是 workspace 选择页面，选择配置的 Team workspace
         if _is_workspace_selection_page(_page):
