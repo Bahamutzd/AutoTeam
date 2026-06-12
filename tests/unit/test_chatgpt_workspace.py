@@ -77,6 +77,42 @@ def test_login_page_url_detection_accepts_openai_auth_and_chatgpt():
     assert chatgpt_api._is_login_page_url("https://chatgpt.com/auth/login")
 
 
+def test_visible_email_locator_uses_typeable_chinese_label(monkeypatch):
+    class FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        def is_visible(self, timeout=None):
+            return True
+
+    class FakeFrame:
+        def __init__(self):
+            self.locator_value = FakeLocator()
+            self.seen_label_texts = None
+
+        def evaluate(self, _script, payload):
+            self.seen_label_texts = payload[0]
+            return {"found": True, "reason": "label-focus", "tag": "INPUT"}
+
+        def locator(self, selector):
+            assert "data-autoteam-auth-email" in selector
+            return self.locator_value
+
+    class FakePage:
+        def __init__(self):
+            self.main_frame = FakeFrame()
+            self.frames = [self.main_frame]
+
+    client = chatgpt_api.ChatGPTTeamAPI()
+    client.page = FakePage()
+
+    monkeypatch.setattr(client, "_visible_locator_in_frames", lambda _selectors, timeout_ms=400: None)
+
+    assert client._visible_email_locator(timeout_ms=100) is client.page.main_frame.locator_value
+    assert "电子邮件地址" in client.page.main_frame.seen_label_texts
+
+
 def test_open_login_page_uses_openai_auth_when_email_input_visible(monkeypatch):
     class FakeLoginButton:
         @property
@@ -105,7 +141,7 @@ def test_open_login_page_uses_openai_auth_when_email_input_visible(monkeypatch):
     monkeypatch.setattr(client, "_wait_for_cloudflare", lambda: None)
     monkeypatch.setattr(client, "_log_login_state", lambda _label: None)
     monkeypatch.setattr(client, "_wait_for_login_step", lambda _steps, timeout=4: ("email_required", None))
-    monkeypatch.setattr(client, "_visible_locator_in_frames", lambda _selectors, timeout_ms=1500: object())
+    monkeypatch.setattr(client, "_visible_email_locator", lambda timeout_ms=1500: object())
 
     selected = client._open_login_page()
 
@@ -142,7 +178,7 @@ def test_open_login_page_falls_back_to_chatgpt_login_when_auth_email_missing(mon
     monkeypatch.setattr(client, "_wait_for_cloudflare", lambda: None)
     monkeypatch.setattr(client, "_log_login_state", lambda _label: None)
     monkeypatch.setattr(client, "_wait_for_login_step", lambda _steps, timeout=4: ("email_required", None))
-    monkeypatch.setattr(client, "_visible_locator_in_frames", lambda _selectors, timeout_ms=1500: next(email_inputs))
+    monkeypatch.setattr(client, "_visible_email_locator", lambda timeout_ms=1500: next(email_inputs))
 
     selected = client._open_login_page()
 
@@ -177,7 +213,7 @@ def test_begin_login_keeps_auth_login_page_for_manual_takeover(monkeypatch, tmp_
     monkeypatch.setattr(client, "_log_login_state", lambda _label: None)
     monkeypatch.setattr(client, "_open_login_page", lambda: None)
     monkeypatch.setattr(client, "_wait_for_login_step", lambda _steps, timeout=12: ("email_required", None))
-    monkeypatch.setattr(client, "_visible_locator_in_frames", lambda _selectors, timeout_ms=5000: None)
+    monkeypatch.setattr(client, "_visible_email_locator", lambda timeout_ms=5000: None)
 
     result = client.begin_login("admin@example.com", actor_label="管理员")
 

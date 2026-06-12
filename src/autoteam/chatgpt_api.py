@@ -36,6 +36,16 @@ LOGIN_URL_MARKERS = (
     "log-in-or-create-account",
     "/auth/login",
 )
+EMAIL_LABEL_TEXTS = (
+    "email address",
+    "e-mail address",
+    "email",
+    "电子邮件地址",
+    "电子邮箱地址",
+    "电子邮件",
+    "电子邮箱",
+    "邮箱",
+)
 
 _WORKSPACE_IGNORE_LABELS = {
     "choose a workspace",
@@ -94,10 +104,19 @@ class ChatGPTTeamAPI:
         'input[id="email-input"]',
         'input[id="email"]',
         'input[type="email"]',
+        'input[aria-label*="email" i]',
+        'input[aria-label*="电子邮件"]',
+        'input[aria-label*="邮箱"]',
         'input[placeholder*="email" i]',
         'input[placeholder*="邮箱"]',
         'input[autocomplete="email"]',
         'input[autocomplete="username"]',
+        '[role="textbox"][aria-label*="email" i]',
+        '[role="textbox"][aria-label*="电子邮件"]',
+        '[role="textbox"][aria-label*="邮箱"]',
+        '[contenteditable="true"][aria-label*="email" i]',
+        '[contenteditable="true"][aria-label*="电子邮件"]',
+        '[contenteditable="true"][aria-label*="邮箱"]',
     ]
     PASSWORD_INPUT_SELECTORS = [
         'input[name="password"]',
@@ -169,6 +188,145 @@ class ChatGPTTeamAPI:
                         return locator
                 except Exception:
                     pass
+            time.sleep(0.2)
+
+        return None
+
+    def _email_locator_from_typeable_label(self, frame):
+        try:
+            marker_attr = "data-autoteam-auth-email"
+            marker_value = str(uuid.uuid4())
+            result = frame.evaluate(
+                """([labelTexts, markerAttr, markerValue]) => {
+                    const norm = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+                    const lower = (text) => norm(text).toLowerCase();
+                    const labelSet = new Set(labelTexts.map(lower));
+                    const editableSelector = [
+                        'input:not([type="hidden"]):not([disabled])',
+                        'textarea:not([disabled])',
+                        '[contenteditable="true"]',
+                        '[role="textbox"]'
+                    ].join(',');
+
+                    const visible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.visibility !== 'hidden'
+                            && style.display !== 'none'
+                            && rect.width > 0
+                            && rect.height > 0;
+                    };
+
+                    const editable = (el) => {
+                        if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                        if (el.matches('input, textarea, [contenteditable="true"], [role="textbox"]')) return true;
+                        return false;
+                    };
+
+                    const mark = (el, reason) => {
+                        if (!editable(el)) return null;
+                        document.querySelectorAll(`[${markerAttr}]`).forEach((node) => node.removeAttribute(markerAttr));
+                        el.setAttribute(markerAttr, markerValue);
+                        try { el.focus(); } catch (_) {}
+                        return {
+                            found: true,
+                            reason,
+                            tag: el.tagName,
+                            type: el.getAttribute('type') || '',
+                            ariaLabel: el.getAttribute('aria-label') || '',
+                        };
+                    };
+
+                    const attrLooksLikeEmail = (el) => {
+                        const attrs = [
+                            el.getAttribute('aria-label'),
+                            el.getAttribute('placeholder'),
+                            el.getAttribute('name'),
+                            el.getAttribute('id'),
+                            el.getAttribute('autocomplete'),
+                            el.getAttribute('aria-labelledby'),
+                        ].join(' ').toLowerCase();
+                        return /email|e-mail|username|电子邮件|电子邮箱|邮箱/.test(attrs);
+                    };
+
+                    for (const el of Array.from(document.querySelectorAll(editableSelector))) {
+                        if (visible(el) && attrLooksLikeEmail(el)) {
+                            return mark(el, 'editable-attrs');
+                        }
+                    }
+
+                    const labelNodes = Array.from(document.querySelectorAll('label, div, span, p'))
+                        .filter((el) => visible(el) && labelSet.has(lower(el.textContent)));
+
+                    for (const label of labelNodes) {
+                        try { label.click(); } catch (_) {}
+                        if (editable(document.activeElement)) {
+                            return mark(document.activeElement, 'label-focus');
+                        }
+
+                        let node = label;
+                        for (let depth = 0; depth < 7 && node; depth += 1, node = node.parentElement) {
+                            const candidate = node.querySelector(editableSelector);
+                            if (!candidate) continue;
+                            try {
+                                candidate.click();
+                                candidate.focus();
+                            } catch (_) {}
+                            if (editable(candidate)) {
+                                return mark(candidate, 'label-ancestor');
+                            }
+                        }
+
+                        const labelledBy = label.id
+                            ? document.querySelector(`${editableSelector}[aria-labelledby~="${CSS.escape(label.id)}"]`)
+                            : null;
+                        if (labelledBy) {
+                            return mark(labelledBy, 'aria-labelledby');
+                        }
+                    }
+
+                    return { found: false };
+                }""",
+                [EMAIL_LABEL_TEXTS, marker_attr, marker_value],
+            )
+            if not result or not result.get("found"):
+                return None
+
+            locator = frame.locator(f'[{marker_attr}="{marker_value}"]').first
+            try:
+                if locator.is_visible(timeout=250):
+                    logger.info("[ChatGPT] 通过邮箱标签定位输入控件: %s", result)
+                    return locator
+            except Exception:
+                pass
+
+            focused = frame.locator(":focus").first
+            try:
+                if focused.is_visible(timeout=250):
+                    logger.info("[ChatGPT] 通过邮箱标签聚焦输入控件: %s", result)
+                    return focused
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return None
+
+    def _visible_email_locator(self, timeout_ms=5000):
+        deadline = time.time() + timeout_ms / 1000
+
+        while time.time() < deadline:
+            locator = self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=400)
+            if locator:
+                return locator
+
+            frames = [self.page.main_frame]
+            frames.extend(frame for frame in self.page.frames if frame != self.page.main_frame)
+            for frame in frames:
+                locator = self._email_locator_from_typeable_label(frame)
+                if locator:
+                    return locator
+
             time.sleep(0.2)
 
         return None
@@ -871,9 +1029,7 @@ class ChatGPTTeamAPI:
                 pass
 
             step, detail = self._wait_for_login_step(allowed_steps, timeout=4)
-            if step == "email_required" and not self._visible_locator_in_frames(
-                self.EMAIL_INPUT_SELECTORS, timeout_ms=1500
-            ):
+            if step == "email_required" and not self._visible_email_locator(timeout_ms=1500):
                 if index < len(LOGIN_PAGE_URLS):
                     logger.warning(
                         "[ChatGPT] 登录页未出现邮箱输入框，尝试备用登录页 | URL=%s | detail=%s",
@@ -1221,7 +1377,7 @@ class ChatGPTTeamAPI:
             logger.info("[ChatGPT] 登录步骤检测: password_required | URL=%s", self.page.url)
             return "password_required", None
 
-        if self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=1200):
+        if self._visible_email_locator(timeout_ms=1200):
             logger.info("[ChatGPT] 登录步骤检测: email_required | URL=%s", self.page.url)
             return "email_required", None
 
@@ -1264,7 +1420,7 @@ class ChatGPTTeamAPI:
             logger.info("[ChatGPT] %s登录初始步骤: %s | detail=%s", actor_label, step, detail)
             return {"step": step, "detail": detail}
 
-        email_input = self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=15000)
+        email_input = self._visible_email_locator(timeout_ms=15000)
         if not email_input:
             try:
                 self.page.screenshot(path=str(SCREENSHOT_DIR / "admin_login_missing_email.png"), full_page=True)
@@ -1288,11 +1444,17 @@ class ChatGPTTeamAPI:
 
         final_step, final_detail = "unknown", self.page.url
         for attempt in range(1, 4):
-            email_input = self._visible_locator_in_frames(self.EMAIL_INPUT_SELECTORS, timeout_ms=3000) or email_input
+            email_input = self._visible_email_locator(timeout_ms=3000) or email_input
             try:
                 email_input.fill(email)
                 email_input.evaluate(
                     """(el, value) => {
+                        if (el.isContentEditable) {
+                            el.textContent = value;
+                            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            return;
+                        }
                         const proto = el instanceof HTMLInputElement
                             ? HTMLInputElement.prototype
                             : HTMLTextAreaElement.prototype;
