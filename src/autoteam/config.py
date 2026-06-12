@@ -1,6 +1,8 @@
 """配置文件 - 从 .env 文件或环境变量加载"""
 
+import logging
 import os
+import shutil
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 
@@ -134,6 +136,21 @@ def _format_proxy_host(hostname: str) -> str:
     return hostname
 
 
+# 各 channel 对应的可执行文件路径（patchright/playwright 的 channel 参数值 → 可执行文件名）
+_CHANNEL_EXECUTABLE_NAMES = {
+    "chrome": "google-chrome",
+    "msedge": "microsoft-edge",
+    "chromium": "chromium",
+    "chromium-browser": "chromium-browser",
+}
+
+
+def _channel_executable_exists(channel: str) -> bool:
+    """检测指定 channel 对应的浏览器可执行文件是否在 PATH 中可找到。"""
+    name = _CHANNEL_EXECUTABLE_NAMES.get(channel.lower(), channel)
+    return shutil.which(name) is not None
+
+
 def _parse_proxy_url(proxy_url: str):
     if "://" not in proxy_url:
         return {"server": proxy_url}
@@ -214,9 +231,14 @@ def get_playwright_launch_options():
 
     # 真实 Chrome 渠道：patchright 下默认启用，可用 PLAYWRIGHT_BROWSER_CHANNEL 覆盖；
     # 显式设为 "chromium" 则使用自带 Chromium（无真实 Chrome 的环境）。
+    # 自动检测：如果真实 Chrome 未安装，回退到自带 Chromium，避免 Linux 服务器报错。
     channel = PLAYWRIGHT_BROWSER_CHANNEL or ("chrome" if USING_PATCHRIGHT else "")
     if channel and channel.lower() != "chromium":
-        options["channel"] = channel
+        if _channel_executable_exists(channel):
+            options["channel"] = channel
+        else:
+            logger = logging.getLogger(__name__)
+            logger.info("[Config] 未找到 %s 可执行文件，回退到自带 Chromium", channel)
 
     proxy = None
     if PLAYWRIGHT_PROXY_URL:
