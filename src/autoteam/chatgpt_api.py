@@ -231,12 +231,43 @@ class ChatGPTTeamAPI:
         ]
 
     def _click_auth_button(self, field, labels):
-        label_re = re.compile(rf"^(?:{'|'.join(re.escape(label) for label in labels)})$", re.I)
+        exact_re = re.compile(rf"^\s*(?:{'|'.join(re.escape(label) for label in labels)})\s*$", re.I)
+        loose_re = re.compile(rf"(?:{'|'.join(re.escape(label) for label in labels)})", re.I)
+
+        def _button_text(locator):
+            try:
+                text = locator.inner_text(timeout=500)
+            except Exception:
+                text = ""
+            if not text:
+                try:
+                    text = locator.get_attribute("aria-label", timeout=500) or ""
+                except Exception:
+                    text = ""
+            if not text:
+                try:
+                    text = locator.get_attribute("value", timeout=500) or ""
+                except Exception:
+                    text = ""
+            return " ".join(text.split())
+
+        def _looks_like_social_auth(text):
+            lower = (text or "").lower()
+            return any(key in lower for key in ("google", "apple", "phone", "microsoft", "sso"))
+
+        def _click_if_visible(locator):
+            try:
+                if locator.is_visible(timeout=2000):
+                    locator.click()
+                    return True
+            except Exception:
+                pass
+            return False
+
         try:
             form = field.locator("xpath=ancestor::form[1]").first
-            btn = form.get_by_role("button", name=label_re).first
-            if btn.is_visible(timeout=2000):
-                btn.click()
+            btn = form.get_by_role("button", name=exact_re).first
+            if _click_if_visible(btn):
                 return True
         except Exception:
             pass
@@ -244,17 +275,34 @@ class ChatGPTTeamAPI:
         try:
             form = field.locator("xpath=ancestor::form[1]").first
             btn = form.locator('button[type="submit"], input[type="submit"]').first
-            if btn.is_visible(timeout=2000):
-                btn.click()
+            if _click_if_visible(btn):
                 return True
         except Exception:
             pass
 
         try:
-            btn = self.page.get_by_role("button", name=label_re).last
-            if btn.is_visible(timeout=2000):
-                btn.click()
+            form = field.locator("xpath=ancestor::form[1]").first
+            buttons = form.locator('button, [role="button"], input[type="button"], input[type="submit"]').all()
+            for btn in buttons:
+                text = _button_text(btn)
+                if loose_re.search(text) and not _looks_like_social_auth(text) and _click_if_visible(btn):
+                    return True
+        except Exception:
+            pass
+
+        try:
+            btn = self.page.get_by_role("button", name=exact_re).last
+            if _click_if_visible(btn):
                 return True
+        except Exception:
+            pass
+
+        try:
+            buttons = self.page.locator('button, [role="button"], input[type="button"], input[type="submit"]').all()
+            for btn in buttons:
+                text = _button_text(btn)
+                if loose_re.search(text) and not _looks_like_social_auth(text) and _click_if_visible(btn):
+                    return True
         except Exception:
             pass
 
@@ -280,6 +328,92 @@ class ChatGPTTeamAPI:
                 self._wait_for_cloudflare()
             time.sleep(0.5)
         return self._detect_login_step()
+
+    def _wait_for_login_step_change(self, previous_step, allowed_steps, timeout=15):
+        deadline = time.time() + timeout
+        last_step, last_detail = previous_step, self.page.url
+        while time.time() < deadline:
+            step, detail = self._detect_login_step()
+            last_step, last_detail = step, detail
+            if step != previous_step and step in allowed_steps:
+                return step, detail
+            if "challenge" in (self.page.url or "").lower():
+                self._wait_for_cloudflare()
+            time.sleep(0.5)
+        return last_step, last_detail
+
+    def refresh_login_step(self):
+        step, detail = self._detect_login_step()
+        if step == "workspace_required":
+            self._list_workspace_options()
+        return {"step": step, "detail": detail}
+
+    def capture_login_debug_snapshot(self, label="admin_login_debug"):
+        if not self.page:
+            return {"available": False, "reason": "Playwright 页面未初始化"}
+
+        SCREENSHOT_DIR.mkdir(exist_ok=True)
+        safe_label = re.sub(r"[^a-zA-Z0-9_.-]+", "_", label or "admin_login_debug").strip("_")
+        if not safe_label:
+            safe_label = "admin_login_debug"
+        screenshot_name = f"{safe_label}_{int(time.time())}.png"
+        screenshot_path = SCREENSHOT_DIR / screenshot_name
+
+        step, detail = self._detect_login_step()
+        try:
+            title = self.page.title()
+        except Exception:
+            title = ""
+        try:
+            self.page.screenshot(path=str(screenshot_path), full_page=True)
+        except Exception as exc:
+            screenshot_name = ""
+            logger.warning("[ChatGPT] 登录调试截图失败: %s", exc)
+
+        try:
+            dom_summary = self.page.evaluate(
+                """() => {
+                const visible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style && style.visibility !== 'hidden' && style.display !== 'none'
+                        && rect.width > 0 && rect.height > 0;
+                };
+                const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                const inputs = Array.from(document.querySelectorAll('input, textarea')).slice(0, 30).map(el => ({
+                    tag: el.tagName.toLowerCase(),
+                    type: el.getAttribute('type') || '',
+                    name: el.getAttribute('name') || '',
+                    id: el.id || '',
+                    placeholder: el.getAttribute('placeholder') || '',
+                    autocomplete: el.getAttribute('autocomplete') || '',
+                    disabled: Boolean(el.disabled),
+                    visible: visible(el),
+                }));
+                const buttons = Array.from(document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')).slice(0, 40).map(el => ({
+                    tag: el.tagName.toLowerCase(),
+                    text: norm(el.innerText || el.textContent || el.getAttribute('value') || el.getAttribute('aria-label')),
+                    type: el.getAttribute('type') || '',
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    disabled: Boolean(el.disabled) || el.getAttribute('aria-disabled') === 'true',
+                    visible: visible(el),
+                }));
+                return { inputs, buttons };
+            }"""
+            )
+        except Exception:
+            dom_summary = {"inputs": [], "buttons": []}
+
+        return {
+            "available": True,
+            "url": self.page.url,
+            "title": title,
+            "step": step,
+            "detail": detail,
+            "body": self._body_excerpt(limit=1200),
+            "screenshot": screenshot_name,
+            "dom": dom_summary,
+        }
 
     def _extract_session_token(self):
         cookies = self.context.cookies()
@@ -1071,8 +1205,9 @@ class ChatGPTTeamAPI:
             time.sleep(0.5)
             clicked = self._click_auth_button(email_input, ["Continue", "继续", "Log in"])
             logger.info("[ChatGPT] %s邮箱已提交（第 %d 次）| clicked=%s", actor_label, attempt, clicked)
-            final_step, final_detail = self._wait_for_login_step(
-                {"email_required", "password_required", "code_required", "workspace_required", "completed", "error"},
+            final_step, final_detail = self._wait_for_login_step_change(
+                "email_required",
+                {"password_required", "code_required", "workspace_required", "completed", "error"},
                 timeout=12,
             )
             self._log_login_state(f"{actor_label}邮箱提交后（第 {attempt} 次）")
@@ -1089,10 +1224,11 @@ class ChatGPTTeamAPI:
             )
 
         if final_step == "email_required":
-            raise RuntimeError(
-                f"{actor_label}邮箱提交后仍停留在邮箱步骤，请检查登录页是否拦截/未响应。"
+            final_detail = (
+                f"{actor_label}邮箱提交后仍停留在邮箱步骤，可在浏览器窗口手动接管后重新识别。"
                 f" 当前 URL: {self.page.url}，页面片段: {self._body_excerpt()}"
             )
+            logger.warning("[ChatGPT] %s", final_detail)
 
         logger.info("[ChatGPT] %s邮箱提交结果: %s | detail=%s", actor_label, final_step, final_detail)
         return {"step": final_step, "detail": final_detail}
@@ -1109,13 +1245,23 @@ class ChatGPTTeamAPI:
         logger.info("[ChatGPT] 提交%s密码前 | URL=%s", actor_label, self.page.url)
         password_input.fill(password)
         time.sleep(0.5)
-        self._click_auth_button(password_input, ["Continue", "继续", "Log in"])
-        time.sleep(8)
+        clicked = self._click_auth_button(password_input, ["Continue", "继续", "Log in"])
+        logger.info("[ChatGPT] %s密码已提交 | clicked=%s", actor_label, clicked)
+        step, detail = self._wait_for_login_step_change(
+            "password_required",
+            {"code_required", "workspace_required", "completed", "error"},
+            timeout=15,
+        )
         self._log_login_state(f"{actor_label}密码提交后")
-
-        step, detail = self._detect_login_step()
         if step == "workspace_required":
             self._list_workspace_options()
+        if step == "password_required":
+            logger.warning(
+                "[ChatGPT] %s密码提交后仍停留在密码步骤 | URL=%s | body=%s",
+                actor_label,
+                self.page.url,
+                self._body_excerpt(),
+            )
         logger.info("[ChatGPT] %s密码提交结果: %s | detail=%s", actor_label, step, detail)
         return {"step": step, "detail": detail}
 
@@ -1140,19 +1286,32 @@ class ChatGPTTeamAPI:
                             time.sleep(0.1)
                     time.sleep(0.5)
                     # 可能自动提交，也可能需要点按钮
+                    btn_clicked = False
                     try:
                         btn = self.page.locator(
                             'button:has-text("Continue"), button:has-text("继续"), button:has-text("Verify"), button[type="submit"]'
                         ).first
                         if btn.is_visible(timeout=2000):
                             btn.click()
+                            btn_clicked = True
                     except Exception:
                         pass
-                    time.sleep(8)
+                    logger.info("[ChatGPT] %s验证码已提交（单字符）| btn_clicked=%s", actor_label, btn_clicked)
+                    step, detail = self._wait_for_login_step_change(
+                        "code_required",
+                        {"workspace_required", "completed", "error"},
+                        timeout=15,
+                    )
                     self._log_login_state(f"{actor_label}验证码提交后（单字符）")
-                    step, detail = self._detect_login_step()
                     if step == "workspace_required":
                         self._list_workspace_options()
+                    if step == "code_required":
+                        logger.warning(
+                            "[ChatGPT] %s验证码提交后仍停留在验证码步骤（单字符）| URL=%s | body=%s",
+                            actor_label,
+                            self.page.url,
+                            self._body_excerpt(),
+                        )
                     return {"step": step, "detail": detail}
             except Exception as e:
                 logger.warning("[ChatGPT] 单字符输入框尝试失败: %s", e)
@@ -1179,17 +1338,27 @@ class ChatGPTTeamAPI:
             pass
         code_input.fill(code)
         time.sleep(0.5)
-        self._click_auth_button(code_input, ["Continue", "继续", "Verify"])
-        time.sleep(8)
+        clicked = self._click_auth_button(code_input, ["Continue", "继续", "Verify"])
+        logger.info("[ChatGPT] %s验证码已提交 | clicked=%s", actor_label, clicked)
+        step, detail = self._wait_for_login_step_change(
+            "code_required",
+            {"workspace_required", "completed", "error"},
+            timeout=15,
+        )
         try:
             self.page.screenshot(path=str(SCREENSHOT_DIR / "admin_login_code_after_submit.png"), full_page=True)
         except Exception:
             pass
         self._log_login_state(f"{actor_label}验证码提交后")
-
-        step, detail = self._detect_login_step()
         if step == "workspace_required":
             self._list_workspace_options()
+        if step == "code_required":
+            logger.warning(
+                "[ChatGPT] %s验证码提交后仍停留在验证码步骤 | URL=%s | body=%s",
+                actor_label,
+                self.page.url,
+                self._body_excerpt(),
+            )
         logger.info("[ChatGPT] %s验证码提交结果: %s | detail=%s", actor_label, step, detail)
         return {"step": step, "detail": detail}
 

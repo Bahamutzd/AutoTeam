@@ -21,6 +21,10 @@ from autoteam.textio import parse_env_line, read_text, write_text
 
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
+_SCREENSHOT_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
 app = FastAPI(
     title="AutoTeam API",
     description="ChatGPT Team 账号自动轮转管理 API",
@@ -1264,6 +1268,147 @@ def _set_pending_admin_login(api, step):
     return {"status": step, "admin": _admin_status()}
 
 
+def _screenshot_path(filename: str) -> Path:
+    name = Path(filename or "").name
+    if not name or name != filename:
+        raise HTTPException(status_code=400, detail="无效截图文件名")
+    if Path(name).suffix.lower() not in _SCREENSHOT_SUFFIXES:
+        raise HTTPException(status_code=400, detail="不支持的截图文件类型")
+    path = (SCREENSHOT_DIR / name).resolve()
+    root = SCREENSHOT_DIR.resolve()
+    if root != path.parent:
+        raise HTTPException(status_code=400, detail="无效截图路径")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="截图不存在")
+    return path
+
+
+def _list_screenshots(limit: int = 60):
+    if not SCREENSHOT_DIR.exists():
+        return []
+    files = []
+    for path in SCREENSHOT_DIR.iterdir():
+        if not path.is_file() or path.suffix.lower() not in _SCREENSHOT_SUFFIXES:
+            continue
+        stat = path.stat()
+        files.append(
+            {
+                "name": path.name,
+                "size": stat.st_size,
+                "modified_at": stat.st_mtime,
+                "url": f"/api/screenshots/{path.name}",
+            }
+        )
+    files.sort(key=lambda item: item["modified_at"], reverse=True)
+    return files[: max(1, min(limit, 200))]
+
+
+def _recent_login_logs(limit: int = 80):
+    entries = globals().get("_log_buffer", [])[-limit:]
+    keywords = ("[ChatGPT]", "管理员登录", "admin-login", "login")
+    return [entry for entry in entries if any(key in entry.get("message", "") for key in keywords)]
+
+
+def _local_admin_login_analysis(context: dict):
+    snapshot = context.get("snapshot") or {}
+    logs = context.get("logs") or []
+    body = str(snapshot.get("body") or "").lower()
+    url = str(snapshot.get("url") or "").lower()
+    step = snapshot.get("step") or context.get("admin_status", {}).get("login_step") or ""
+    buttons = ((snapshot.get("dom") or {}).get("buttons") or [])
+    inputs = ((snapshot.get("dom") or {}).get("inputs") or [])
+    log_messages = [str(item.get("message") or "") for item in logs]
+
+    findings = []
+    recommendations = []
+
+    if step == "email_required" and (url.endswith("/auth/login") or "/auth/login" in url):
+        findings.append("当前仍处于邮箱步骤，URL 仍是 /auth/login，说明页面尚未推进到密码、验证码或 workspace。")
+        recommendations.append("先在弹出的 Playwright Chromium 窗口手动点击 Continue，再点“重新识别登录步骤”。")
+
+    if any("clicked=False" in msg and "邮箱已提交" in msg for msg in log_messages):
+        findings.append("日志显示邮箱提交时 clicked=False，程序没有确认点击到登录按钮，只是可能回退到按 Enter。")
+        recommendations.append("优先检查按钮选择器或页面改版；这通常不是密码/验证码问题。")
+    elif any("clicked=True" in msg and "邮箱已提交" in msg for msg in log_messages):
+        findings.append("日志显示 clicked=True，程序认为已点击提交按钮，但页面状态仍未推进。")
+        recommendations.append("如果手动点击可推进，继续收窄为自动化点击事件、前端校验或风控拦截问题。")
+
+    submit_logs = [item for item in logs if "邮箱已提交" in str(item.get("message") or "")]
+    stuck_logs = [item for item in logs if "仍停留在邮箱步骤" in str(item.get("message") or "")]
+    if submit_logs and stuck_logs and abs(float(stuck_logs[-1].get("time", 0)) - float(submit_logs[-1].get("time", 0))) <= 2:
+        findings.append("邮箱提交日志和停留日志时间非常接近，存在提交后过早检测的迹象。")
+        recommendations.append("当前版本已改为等待登录步骤变化后再判断；如果仍复现，应看截图和按钮点击结果。")
+
+    visible_email_inputs = [
+        item for item in inputs if item.get("visible") and ("email" in str(item).lower() or "username" in str(item).lower())
+    ]
+    if step == "email_required" and not visible_email_inputs:
+        findings.append("当前判断为邮箱步骤，但 DOM 摘要里没有明显可见邮箱输入框，可能是页面 A/B 改版或输入框被包装。")
+        recommendations.append("用页面快照中的截图确认是否需要先展开其他登录方式。")
+
+    button_texts = [str(item.get("text") or item.get("ariaLabel") or "") for item in buttons if item.get("visible")]
+    if button_texts and not any(text.strip().lower() in {"continue", "log in", "继续"} for text in button_texts):
+        findings.append("可见按钮文本里没有精确的 Continue/Log in/继续，旧的精确按钮名匹配可能过严。")
+        recommendations.append("当前版本已增加非社交登录按钮的宽松匹配；如果仍失败，查看按钮列表里的实际文本。")
+
+    if "verify you are human" in body or "cloudflare" in body or "challenge" in url:
+        findings.append("页面内容或 URL 出现 Cloudflare/challenge 特征，登录可能被人机验证拦截。")
+        recommendations.append("手动完成验证后再点“重新识别登录步骤”。")
+
+    if "continue with google" in body and "continue chatgpt" in body and step == "email_required":
+        findings.append("body 仍是登录首页文案，页面没有进入下一个认证表单。")
+        recommendations.append("如果截图显示只有第三方登录入口，说明邮箱登录入口可能被页面实验隐藏，需要手动展开或调整选择器。")
+
+    if step in {"password_required", "code_required", "workspace_required", "completed"}:
+        findings.append(f"当前已推进到 {step}，不是邮箱提交卡住。")
+        recommendations.append("继续按当前步骤提交密码、验证码或 workspace；如果已手动完成，点“重新识别登录步骤”。")
+
+    if not findings:
+        findings.append("当前证据不足以锁定单一原因。")
+        recommendations.append("先刷新页面快照并查看最新截图，再手动触发一次 AI 分析。")
+
+    return {
+        "summary": findings[0],
+        "findings": findings,
+        "recommendations": recommendations,
+    }
+
+
+def _call_external_ai_login_analysis(context: dict):
+    api_key = os.environ.get("AUTOTEAM_AI_ANALYSIS_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return None
+
+    import requests
+
+    base_url = (os.environ.get("AUTOTEAM_AI_ANALYSIS_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    model = os.environ.get("AUTOTEAM_AI_ANALYSIS_MODEL") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+    evidence = json.dumps(context, ensure_ascii=False)[:12000]
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是 AutoTeam 登录排障分析器。只基于给定证据判断原因，区分已证实、可能原因和下一步验证，不要编造现场。",
+            },
+            {
+                "role": "user",
+                "content": f"分析管理员 ChatGPT 登录卡住原因，并给出优先级排序和下一步验证。证据 JSON：\n{evidence}",
+            },
+        ],
+        "temperature": 0.1,
+    }
+    response = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+
 def _finish_main_codex_flow():
     global _main_codex_flow, _main_codex_step, _main_codex_action
     flow = _main_codex_flow
@@ -1352,6 +1497,114 @@ def get_manual_account_status():
     return _manual_account_status()
 
 
+@app.get("/api/screenshots")
+def get_screenshots(limit: int = 60):
+    """列出 screenshots/ 目录下的截图。"""
+    return {"items": _list_screenshots(limit=limit)}
+
+
+@app.get("/api/screenshots/{filename}")
+def get_screenshot(filename: str):
+    """读取 screenshots/ 目录下的单个截图。"""
+    return FileResponse(str(_screenshot_path(filename)))
+
+
+@app.post("/api/admin/login/inspect")
+def post_admin_login_inspect():
+    """手动刷新管理员登录页面快照，用于接管和排障。"""
+    if not _admin_login_api:
+        return {
+            "available": False,
+            "reason": "当前没有正在进行的管理员登录流程",
+            "admin": _admin_status(),
+            "screenshots": _list_screenshots(),
+        }
+    try:
+        snapshot = _pw_executor.run(
+            _admin_login_api.capture_login_debug_snapshot,
+            "admin_login_debug",
+            timeout_seconds=60,
+        )
+    except Exception as exc:
+        logger.exception("[API] 管理员登录页面快照失败")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {**snapshot, "admin": _admin_status(), "screenshots": _list_screenshots()}
+
+
+@app.post("/api/admin/login/refresh")
+def post_admin_login_refresh():
+    """用户手动接管 Playwright 页面后，重新识别当前登录步骤。"""
+    global _admin_login_step
+    if not _admin_login_api:
+        raise HTTPException(status_code=409, detail="当前没有正在进行的管理员登录流程")
+    try:
+        result = _pw_executor.run(_admin_login_api.refresh_login_step, timeout_seconds=60)
+    except Exception as exc:
+        logger.exception("[API] 重新识别管理员登录步骤失败")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    step = result.get("step")
+    if step == "completed":
+        return _finish_admin_login(result)
+    if step in ("email_required", "password_required", "code_required", "workspace_required"):
+        _admin_login_step = step
+        return _set_pending_admin_login(_admin_login_api, step)
+    if step == "error":
+        raise HTTPException(status_code=400, detail=result.get("detail") or "登录页进入错误状态")
+    return {"status": step or "unknown", "detail": result.get("detail"), "admin": _admin_status()}
+
+
+@app.post("/api/admin/login/analyze")
+def post_admin_login_analyze():
+    """手动触发一次管理员登录卡住原因分析；自动流程不会调用该接口。"""
+    snapshot = {}
+    external_error = ""
+    if _admin_login_api:
+        try:
+            snapshot = _pw_executor.run(
+                _admin_login_api.capture_login_debug_snapshot,
+                "admin_login_ai_analysis",
+                timeout_seconds=60,
+            )
+        except Exception as exc:
+            logger.warning("[API] AI 分析前采集页面快照失败: %s", exc)
+            snapshot = {"available": False, "reason": str(exc)}
+    else:
+        snapshot = {"available": False, "reason": "当前没有正在进行的管理员登录流程"}
+
+    context = {
+        "manual_trigger": True,
+        "admin_status": _admin_status(),
+        "snapshot": snapshot,
+        "logs": _recent_login_logs(),
+        "screenshots": _list_screenshots(limit=20),
+    }
+    local_analysis = _local_admin_login_analysis(context)
+    try:
+        external_text = _call_external_ai_login_analysis(context)
+    except Exception as exc:
+        logger.warning("[API] 外部 AI 登录分析失败，回退本地规则: %s", exc)
+        external_text = ""
+        external_error = str(exc)
+
+    if external_text:
+        return {
+            "engine": "openai-compatible",
+            "manual_trigger": True,
+            "analysis": external_text,
+            "local_analysis": local_analysis,
+            "context": context,
+        }
+
+    return {
+        "engine": "local-rules",
+        "manual_trigger": True,
+        "analysis": local_analysis,
+        "external_error": external_error,
+        "context": context,
+    }
+
+
 @app.post("/api/admin/login/start")
 def post_admin_login_start(params: AdminEmailParams):
     """开始管理员登录流程。"""
@@ -1388,7 +1641,7 @@ def post_admin_login_start(params: AdminEmailParams):
         if step == "completed":
             _admin_login_api = api
             return _finish_admin_login(result)
-        if step in ("password_required", "code_required", "workspace_required"):
+        if step in ("email_required", "password_required", "code_required", "workspace_required"):
             return _set_pending_admin_login(api, step)
         _pw_executor.run(api.stop)
         _playwright_lock.release()

@@ -172,35 +172,89 @@ def _write_auth_file(filepath, bundle):
 def _click_primary_auth_button(page, field, labels):
     """
     只点击当前输入框所在表单的主按钮，避免误点 Continue with Google/Apple/Microsoft。
+    对齐 chatgpt_api._click_auth_button 的宽松匹配 + 社交登录过滤策略。
     """
-    label_re = re.compile(rf"^(?:{'|'.join(re.escape(label) for label in labels)})$", re.I)
+    exact_re = re.compile(rf"^\s*(?:{'|'.join(re.escape(label) for label in labels)})\s*$", re.I)
+    loose_re = re.compile(rf"(?:{'|'.join(re.escape(label) for label in labels)})", re.I)
 
+    def _button_text(locator):
+        try:
+            text = locator.inner_text(timeout=500)
+        except Exception:
+            text = ""
+        if not text:
+            try:
+                text = locator.get_attribute("aria-label", timeout=500) or ""
+            except Exception:
+                text = ""
+        if not text:
+            try:
+                text = locator.get_attribute("value", timeout=500) or ""
+            except Exception:
+                text = ""
+        return " ".join(text.split())
+
+    def _looks_like_social_auth(text):
+        lower = (text or "").lower()
+        return any(key in lower for key in ("google", "apple", "phone", "microsoft", "sso"))
+
+    def _click_if_visible(locator):
+        try:
+            if locator.is_visible(timeout=2000):
+                locator.click()
+                return True
+        except Exception:
+            pass
+        return False
+
+    # 策略1: form 内精确匹配按钮
     try:
         form = field.locator("xpath=ancestor::form[1]").first
-        btn = form.get_by_role("button", name=label_re).first
-        if btn.is_visible(timeout=2000):
-            btn.click()
+        btn = form.get_by_role("button", name=exact_re).first
+        if _click_if_visible(btn):
             return True
     except Exception:
         pass
 
+    # 策略2: form 内 submit 按钮
     try:
         form = field.locator("xpath=ancestor::form[1]").first
         btn = form.locator('button[type="submit"], input[type="submit"]').first
-        if btn.is_visible(timeout=2000):
-            btn.click()
+        if _click_if_visible(btn):
             return True
     except Exception:
         pass
 
+    # 策略3: form 内宽松匹配 + 过滤社交登录
     try:
-        btn = page.get_by_role("button", name=label_re).last
-        if btn.is_visible(timeout=2000):
-            btn.click()
+        form = field.locator("xpath=ancestor::form[1]").first
+        buttons = form.locator('button, [role="button"], input[type="button"], input[type="submit"]').all()
+        for btn in buttons:
+            text = _button_text(btn)
+            if loose_re.search(text) and not _looks_like_social_auth(text) and _click_if_visible(btn):
+                return True
+    except Exception:
+        pass
+
+    # 策略4: 全页面精确匹配（取 last，通常主按钮在后面）
+    try:
+        btn = page.get_by_role("button", name=exact_re).last
+        if _click_if_visible(btn):
             return True
     except Exception:
         pass
 
+    # 策略5: 全页面宽松匹配 + 过滤社交登录
+    try:
+        buttons = page.locator('button, [role="button"], input[type="button"], input[type="submit"]').all()
+        for btn in buttons:
+            text = _button_text(btn)
+            if loose_re.search(text) and not _looks_like_social_auth(text) and _click_if_visible(btn):
+                return True
+    except Exception:
+        pass
+
+    # 策略6: Enter 回退
     try:
         field.press("Enter")
         return True
@@ -909,7 +963,8 @@ def login_codex_via_browser(
             if ei.is_visible(timeout=5000):
                 ei.fill(email)
                 time.sleep(0.5)
-                _click_primary_auth_button(_page, ei, ["Continue", "继续"])
+                clicked = _click_primary_auth_button(_page, ei, ["Continue", "继续"])
+                logger.info("[Codex] ChatGPT 邮箱已提交 | clicked=%s", clicked)
                 time.sleep(3)
         except Exception:
             pass
@@ -921,7 +976,8 @@ def login_codex_via_browser(
                 if password:
                     pi.fill(password)
                     time.sleep(0.5)
-                    _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                    clicked = _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                    logger.info("[Codex] ChatGPT 密码已提交 | clicked=%s", clicked)
                 else:
                     # 没有密码，点击"使用一次性验证码登录"
                     otp_btn = _page.locator(
@@ -932,7 +988,8 @@ def login_codex_via_browser(
                         otp_btn.click()
                     else:
                         # fallback: 提交空密码让页面报错，然后找验证码按钮
-                        _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                        clicked = _click_primary_auth_button(_page, pi, ["Continue", "继续", "Log in"])
+                        logger.info("[Codex] ChatGPT 空密码已提交（fallback）| clicked=%s", clicked)
                 time.sleep(8)
         except Exception:
             pass
@@ -1009,7 +1066,8 @@ def login_codex_via_browser(
 
                 email_input.fill(email)
                 time.sleep(0.5)
-                _click_primary_auth_button(page, email_input, ["Continue", "继续"])
+                clicked = _click_primary_auth_button(page, email_input, ["Continue", "继续"])
+                logger.info("[Codex] OAuth 邮箱已提交（第 %d 次）| clicked=%s", attempt + 1, clicked)
                 time.sleep(3)
 
                 if not _is_google_redirect(page):
@@ -1032,7 +1090,8 @@ def login_codex_via_browser(
 
                 pwd_input.fill(password)
                 time.sleep(0.5)
-                _click_primary_auth_button(page, pwd_input, ["Continue", "继续", "Log in"])
+                clicked = _click_primary_auth_button(page, pwd_input, ["Continue", "继续", "Log in"])
+                logger.info("[Codex] OAuth 密码已提交（第 %d 次）| clicked=%s", attempt + 1, clicked)
                 time.sleep(5)
 
                 if not _is_google_redirect(page):
@@ -1606,7 +1665,8 @@ class SessionCodexAuthFlow:
 
         password_input.fill(password)
         time.sleep(0.5)
-        _click_primary_auth_button(self.page, password_input, ["Continue", "继续", "Log in"])
+        clicked = _click_primary_auth_button(self.page, password_input, ["Continue", "继续", "Log in"])
+        logger.info("[Codex] 密码已提交 | clicked=%s", clicked)
         time.sleep(5)
         return self._advance()
 
@@ -1617,7 +1677,8 @@ class SessionCodexAuthFlow:
 
         code_input.fill(code)
         time.sleep(0.5)
-        _click_primary_auth_button(self.page, code_input, ["Continue", "继续", "Verify"])
+        clicked = _click_primary_auth_button(self.page, code_input, ["Continue", "继续", "Verify"])
+        logger.info("[Codex] 验证码已提交 | clicked=%s", clicked)
         time.sleep(5)
         return self._advance()
 

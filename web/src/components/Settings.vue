@@ -194,7 +194,17 @@
           当前邮箱: <span class="font-mono">{{ loginEmail || props.adminStatus?.email || '-' }}</span>
         </div>
 
-        <div v-if="props.adminStatus?.login_step === 'password_required'" class="flex flex-col sm:flex-row gap-3">
+        <div v-if="props.adminStatus?.login_step === 'email_required'" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-sm space-y-2">
+          <div class="text-amber-300 font-medium">邮箱提交后页面未推进</div>
+          <div class="text-gray-400 text-xs leading-relaxed">
+            程序已尝试提交邮箱但页面仍停留在邮箱输入步骤。可能原因：按钮点击未生效、页面改版、网络延迟或风控拦截。
+          </div>
+          <div class="text-gray-500 text-xs">
+            建议：在弹出的 Playwright Chromium 窗口中手动完成邮箱步骤，然后点击下方「重新识别登录步骤」继续自动化流程；或使用「查看页面快照」和「AI 分析」辅助排障。
+          </div>
+        </div>
+
+        <div v-else-if="props.adminStatus?.login_step === 'password_required'" class="flex flex-col sm:flex-row gap-3">
           <input
             v-model="password"
             type="password"
@@ -270,6 +280,133 @@
           >
             取消登录
           </button>
+        </div>
+
+        <!-- 排障工具 -->
+        <div class="mt-4 border-t border-gray-800 pt-4">
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-sm font-medium text-white">排障工具</div>
+            <span class="text-xs text-gray-500">手动触发，不会自动调用</span>
+          </div>
+
+          <div class="flex flex-wrap gap-2 mb-3">
+            <button
+              @click="inspectPage"
+              :disabled="inspecting || submitting"
+              class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
+              :class="inspecting
+                ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                : 'bg-indigo-600/10 text-indigo-400 border-indigo-500/30 hover:bg-indigo-600/20'"
+            >
+              {{ inspecting ? '采集中...' : '查看页面快照' }}
+            </button>
+            <button
+              @click="refreshStep"
+              :disabled="refreshing || submitting"
+              class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
+              :class="refreshing
+                ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                : 'bg-emerald-600/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-600/20'"
+            >
+              {{ refreshing ? '识别中...' : '重新识别登录步骤' }}
+            </button>
+            <button
+              @click="analyzeStuck"
+              :disabled="analyzing || submitting"
+              class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
+              :class="analyzing
+                ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                : 'bg-amber-600/10 text-amber-400 border-amber-500/30 hover:bg-amber-600/20'"
+            >
+              {{ analyzing ? '分析中...' : 'AI 分析卡住原因' }}
+            </button>
+            <button
+              @click="loadScreenshots"
+              :disabled="screenshotsLoading"
+              class="px-3 py-1.5 text-xs rounded-lg border transition disabled:opacity-50"
+              :class="screenshotsLoading
+                ? 'bg-gray-800 text-gray-500 border-gray-700 cursor-not-allowed'
+                : 'bg-cyan-600/10 text-cyan-400 border-cyan-500/30 hover:bg-cyan-600/20'"
+            >
+              {{ screenshotsLoading ? '加载中...' : '查看截图列表' }}
+            </button>
+          </div>
+
+          <!-- 页面快照结果 -->
+          <div v-if="snapshot" class="mb-3 rounded-xl border border-gray-800 bg-gray-800/40 p-4 text-xs space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-medium text-white">页面快照</div>
+              <button @click="snapshot = null" class="text-gray-500 hover:text-gray-300">&times;</button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div><span class="text-gray-500">URL:</span> <span class="text-gray-300 break-all">{{ snapshot.url || '-' }}</span></div>
+              <div><span class="text-gray-500">标题:</span> <span class="text-gray-300">{{ snapshot.title || '-' }}</span></div>
+              <div><span class="text-gray-500">检测步骤:</span> <span class="text-gray-300">{{ snapshot.step || '-' }}</span></div>
+              <div><span class="text-gray-500">截图:</span>
+                <a v-if="snapshot.screenshot" :href="`/api/screenshots/${snapshot.screenshot}`" target="_blank" class="text-blue-400 hover:underline">{{ snapshot.screenshot }}</a>
+                <span v-else class="text-gray-500">无</span>
+              </div>
+            </div>
+            <div v-if="snapshot.body" class="mt-2">
+              <div class="text-gray-500 mb-1">页面文本摘要:</div>
+              <pre class="text-gray-400 whitespace-pre-wrap break-all max-h-32 overflow-y-auto bg-gray-900 rounded p-2">{{ snapshot.body }}</pre>
+            </div>
+            <div v-if="snapshot.dom" class="mt-2">
+              <div class="text-gray-500 mb-1">可见输入框 ({{ snapshot.dom.inputs?.filter(i => i.visible).length || 0 }}):</div>
+              <div v-for="(inp, idx) in (snapshot.dom.inputs || []).filter(i => i.visible)" :key="'inp-'+idx" class="text-gray-400 ml-2">
+                &lt;{{ inp.tag }}&gt; type={{ inp.type || 'text' }} name={{ inp.name || '-' }} placeholder="{{ inp.placeholder || '-' }}" {{ inp.disabled ? '[disabled]' : '' }}
+              </div>
+              <div class="text-gray-500 mt-2 mb-1">可见按钮 ({{ snapshot.dom.buttons?.filter(b => b.visible).length || 0 }}):</div>
+              <div v-for="(btn, idx) in (snapshot.dom.buttons || []).filter(b => b.visible)" :key="'btn-'+idx" class="text-gray-400 ml-2">
+                "{{ btn.text || btn.ariaLabel || '-' }}" {{ btn.disabled ? '[disabled]' : '' }}
+              </div>
+            </div>
+          </div>
+
+          <!-- AI 分析结果 -->
+          <div v-if="analysis" class="mb-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="text-sm font-medium text-amber-300">
+                AI 分析结果
+                <span class="ml-2 text-xs text-gray-500">(引擎: {{ analysis.engine || '-' }})</span>
+              </div>
+              <button @click="analysis = null" class="text-gray-500 hover:text-gray-300">&times;</button>
+            </div>
+            <div v-if="analysis.analysis" class="text-gray-300 whitespace-pre-wrap leading-relaxed">{{ analysis.analysis }}</div>
+            <div v-if="analysis.local_analysis" class="mt-2 border-t border-amber-500/10 pt-2">
+              <div class="text-gray-500 mb-1">本地规则分析:</div>
+              <div class="text-gray-400">{{ analysis.local_analysis?.summary || '-' }}</div>
+              <div v-if="analysis.local_analysis?.findings?.length" class="mt-1 space-y-1">
+                <div v-for="(f, idx) in analysis.local_analysis.findings" :key="'f-'+idx" class="text-gray-400">• {{ f }}</div>
+              </div>
+              <div v-if="analysis.local_analysis?.recommendations?.length" class="mt-1 space-y-1">
+                <div class="text-gray-500">建议:</div>
+                <div v-for="(r, idx) in analysis.local_analysis.recommendations" :key="'r-'+idx" class="text-emerald-400">→ {{ r }}</div>
+              </div>
+            </div>
+            <div v-if="analysis.external_error" class="text-red-400 text-xs mt-1">外部 AI 调用失败: {{ analysis.external_error }}</div>
+          </div>
+
+          <!-- 截图列表 -->
+          <div v-if="screenshots && screenshots.length" class="rounded-xl border border-gray-800 bg-gray-800/40 p-4 text-xs">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-sm font-medium text-white">截图列表 ({{ screenshots.length }})</div>
+              <button @click="screenshots = null" class="text-gray-500 hover:text-gray-300">&times;</button>
+            </div>
+            <div class="max-h-48 overflow-y-auto space-y-1">
+              <div v-for="(ss, idx) in screenshots" :key="'ss-'+idx" class="flex items-center justify-between gap-3 py-1">
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="text-gray-600 shrink-0">#{{ idx + 1 }}</span>
+                  <a :href="ss.url" target="_blank" class="text-blue-400 hover:underline truncate">{{ ss.name }}</a>
+                  <span class="text-gray-600 shrink-0">{{ formatSize(ss.size) }}</span>
+                </div>
+                <span class="text-gray-600 shrink-0">{{ formatTime(ss.modified_at) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="screenshots && !screenshots.length" class="text-xs text-gray-500">
+            暂无截图
+          </div>
         </div>
       </div>
 
@@ -453,6 +590,15 @@ const messageClass = ref('')
 const adminSubmittingHint = ref('')
 const codexSubmittingHint = ref('')
 
+// 排障工具状态
+const inspecting = ref(false)
+const refreshing = ref(false)
+const analyzing = ref(false)
+const screenshotsLoading = ref(false)
+const snapshot = ref(null)
+const analysis = ref(null)
+const screenshots = ref(null)
+
 const adminConfigured = computed(() => !!props.adminStatus?.configured)
 const adminBusy = computed(() => !!props.adminStatus?.login_in_progress)
 const codexBusy = computed(() => !!props.codexStatus?.in_progress)
@@ -611,6 +757,9 @@ async function cancelLogin() {
     await api.cancelAdminLogin()
     password.value = ''
     code.value = ''
+    snapshot.value = null
+    analysis.value = null
+    screenshots.value = null
     setMessage('管理员登录已取消')
     emit('refresh')
   } catch (e) {
@@ -618,6 +767,71 @@ async function cancelLogin() {
   } finally {
     submitting.value = false
   }
+}
+
+async function inspectPage() {
+  inspecting.value = true
+  try {
+    snapshot.value = await api.inspectAdminLogin()
+  } catch (e) {
+    setMessage('获取页面快照失败: ' + e.message, 'error')
+  } finally {
+    inspecting.value = false
+  }
+}
+
+async function refreshStep() {
+  refreshing.value = true
+  try {
+    const result = await api.refreshAdminLogin()
+    if (result.status === 'completed') {
+      setMessage('管理员登录完成')
+      emit('refresh')
+    } else {
+      setMessage('已重新识别登录步骤: ' + (result.status || 'unknown'))
+      emit('admin-progress')
+    }
+  } catch (e) {
+    setMessage('重新识别失败: ' + e.message, 'error')
+  } finally {
+    refreshing.value = false
+  }
+}
+
+async function analyzeStuck() {
+  analyzing.value = true
+  try {
+    analysis.value = await api.analyzeAdminLogin()
+  } catch (e) {
+    setMessage('AI 分析失败: ' + e.message, 'error')
+  } finally {
+    analyzing.value = false
+  }
+}
+
+async function loadScreenshots() {
+  screenshotsLoading.value = true
+  try {
+    const result = await api.getScreenshots(60)
+    screenshots.value = result.items || []
+  } catch (e) {
+    setMessage('加载截图列表失败: ' + e.message, 'error')
+  } finally {
+    screenshotsLoading.value = false
+  }
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '0 B'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / 1048576).toFixed(1) + ' MB'
+}
+
+function formatTime(ts) {
+  if (!ts) return '-'
+  const d = new Date(ts * 1000)
+  return d.toLocaleString()
 }
 
 async function logoutAdmin() {
