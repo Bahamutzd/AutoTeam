@@ -19,7 +19,7 @@ from autoteam.admin_state import (
 )
 from autoteam.auth_storage import AUTH_DIR, ensure_auth_dir, ensure_auth_file_permissions
 from autoteam.browser_runtime import USING_PATCHRIGHT, sync_playwright
-from autoteam.config import get_playwright_launch_options
+from autoteam.config import get_playwright_context_options, get_playwright_launch_options
 from autoteam.signup_profile import SignupProfile, generate_signup_profile
 from autoteam.textio import write_text
 
@@ -914,10 +914,7 @@ def login_codex_via_browser(
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**get_playwright_launch_options())
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
+        context = browser.new_context(**get_playwright_context_options())
         if not USING_PATCHRIGHT:
             context.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
@@ -960,21 +957,59 @@ def login_codex_via_browser(
 
         logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
         _page = context.new_page()
+
+        # 监听 Cloudflare 托管挑战：站内 fetch(/api/auth/signin/openai) 被 403 + cf-mitigated
+        # 拦截时置位，便于改走顶层导航兜底（XHR 拿到整页 HTML 挑战无法处理，会让页面挂死）。
+        _cf_state = {"challenged": False}
+
+        def _on_cf_response(response):
+            try:
+                if response.status == 403 and (response.headers or {}).get("cf-mitigated") == "challenge":
+                    _cf_state["challenged"] = True
+                    logger.warning("[Codex] 捕获到 Cloudflare 托管挑战响应: %s", response.url)
+            except Exception:
+                pass
+
+        _page.on("response", _on_cf_response)
+
         _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
 
-        # Cloudflare
+        # Cloudflare 整页挑战
         for _i in range(12):
             if "verify you are human" not in _page.content()[:2000].lower():
                 break
             time.sleep(5)
 
-        # 点击登录
+        # 进入登录表单：邮箱框已直接出现就不点站内"登录"按钮（其 fetch 会命中托管挑战）；
+        # 必须点击且点完检测到挑战时，改为顶层导航到 auth.openai.com/log-in，让挑战以可解的
+        # 整页形式出现后再继续。
+        _email_visible = False
         try:
-            _page.locator('button:has-text("登录"), button:has-text("Log in")').first.click()
-            time.sleep(3)
+            _email_visible = _page.locator(
+                'input[name="email"], input[id="email-input"], input[id="email"]'
+            ).first.is_visible(timeout=3000)
         except Exception:
             pass
+
+        if not _email_visible:
+            _cf_state["challenged"] = False
+            try:
+                _page.locator('button:has-text("登录"), button:has-text("Log in")').first.click()
+                time.sleep(3)
+            except Exception:
+                pass
+            if _cf_state["challenged"]:
+                logger.warning("[Codex] 站内登录请求命中 Cloudflare 托管挑战，改为顶层导航到 auth.openai.com/log-in 重试")
+                try:
+                    _page.goto("https://auth.openai.com/log-in", wait_until="domcontentloaded", timeout=60000)
+                    time.sleep(3)
+                    for _i in range(12):
+                        if "verify you are human" not in _page.content()[:2000].lower():
+                            break
+                        time.sleep(5)
+                except Exception as exc:
+                    logger.warning("[Codex] 顶层导航登录页失败: %s", exc)
 
         # 输入邮箱（避免误点 Google/Microsoft 第三方登录按钮）
         email_submitted = False

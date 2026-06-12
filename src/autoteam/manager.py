@@ -56,7 +56,7 @@ from autoteam.codex_auth import (
     refresh_access_token,
     save_auth_file,
 )
-from autoteam.config import get_playwright_launch_options
+from autoteam.config import get_playwright_context_options, get_playwright_launch_options
 from autoteam.cpa_sync import sync_from_cpa
 from autoteam.mail_provider import (
     get_account_mail_provider,
@@ -1282,10 +1282,7 @@ def _complete_registration(email, password, invite_link, mail_client):
     logger.info("[注册] 开始注册 %s...", email)
     with sync_playwright() as p:
         browser = p.chromium.launch(**get_playwright_launch_options())
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
+        context = browser.new_context(**get_playwright_context_options())
         page = context.new_page()
         result, password = register_with_invite(
             page,
@@ -1822,10 +1819,7 @@ def _register_direct_once(
         if sys.platform.startswith("win"):
             launch_kwargs["slow_mo"] = 100
         browser = p.chromium.launch(**launch_kwargs)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        )
+        context = browser.new_context(**get_playwright_context_options())
         page = context.new_page()
 
         page.goto(signup_url, wait_until="domcontentloaded", timeout=60000)

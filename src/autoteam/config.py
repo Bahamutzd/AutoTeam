@@ -114,6 +114,11 @@ PLAYWRIGHT_PROXY_USERNAME = os.environ.get("PLAYWRIGHT_PROXY_USERNAME", "").stri
 PLAYWRIGHT_PROXY_PASSWORD = os.environ.get("PLAYWRIGHT_PROXY_PASSWORD", "").strip()
 PLAYWRIGHT_PROXY_BYPASS = os.environ.get("PLAYWRIGHT_PROXY_BYPASS", "").strip()
 
+# 浏览器渠道：patchright 推荐使用真实 Chrome（而非自带 Chromium）以最大化反检测效果，
+# 因此使用 patchright 时默认 channel="chrome"。可用此环境变量覆盖（如 "msedge"），
+# 设为空字符串或 "chromium" 则使用自带 Chromium（无真实 Chrome 的环境可这样关闭）。
+PLAYWRIGHT_BROWSER_CHANNEL = os.environ.get("PLAYWRIGHT_BROWSER_CHANNEL", "").strip()
+
 # WebDAV 远程备份
 WEBDAV_BACKUP_ENABLED = _get_bool_env("WEBDAV_BACKUP_ENABLED", False)
 WEBDAV_URL = os.environ.get("WEBDAV_URL", "").strip()
@@ -192,11 +197,26 @@ def get_chatgpt_http_proxy_url() -> str:
 
 
 def get_playwright_launch_options():
-    """统一的 Playwright Chromium 启动参数。"""
-    options = {
-        "headless": False,
-        "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-    }
+    """统一的 Playwright Chromium 启动参数。
+
+    使用 patchright 时遵循其反检测最佳实践：使用真实 Chrome 渠道，并避免注入
+    会反过来成为指纹的 automation flag（patchright 已在内核层抹除 webdriver 等痕迹）；
+    回退官方 playwright 时维持原有的 --disable-blink-features 注入。
+    """
+    from autoteam.browser_runtime import USING_PATCHRIGHT
+
+    options = {"headless": False}
+
+    if USING_PATCHRIGHT:
+        options["args"] = ["--no-sandbox"]
+    else:
+        options["args"] = ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+
+    # 真实 Chrome 渠道：patchright 下默认启用，可用 PLAYWRIGHT_BROWSER_CHANNEL 覆盖；
+    # 显式设为 "chromium" 则使用自带 Chromium（无真实 Chrome 的环境）。
+    channel = PLAYWRIGHT_BROWSER_CHANNEL or ("chrome" if USING_PATCHRIGHT else "")
+    if channel and channel.lower() != "chromium":
+        options["channel"] = channel
 
     proxy = None
     if PLAYWRIGHT_PROXY_URL:
@@ -214,3 +234,13 @@ def get_playwright_launch_options():
         options["proxy"] = proxy
 
     return options
+
+
+def get_playwright_context_options():
+    """统一的浏览器 context 参数。
+
+    不再覆盖 user_agent：让浏览器使用与 sec-ch-ua client-hints 相一致的原生 UA，
+    避免"UA 与 client-hints 版本不一致"这一典型机器人特征被 Cloudflare 识别
+    （此前硬编码 Chrome/146 但真实内核为 148，二者矛盾会拉低风控评分）。
+    """
+    return {"viewport": {"width": 1280, "height": 800}}

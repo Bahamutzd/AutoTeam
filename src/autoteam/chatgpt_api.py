@@ -17,7 +17,7 @@ from autoteam.admin_state import (
 )
 from autoteam.browser_runtime import USING_PATCHRIGHT, sync_playwright
 from autoteam.chatgpt_transport import build_chatgpt_transport
-from autoteam.config import get_playwright_launch_options
+from autoteam.config import get_playwright_context_options, get_playwright_launch_options
 from autoteam.textio import read_text
 
 logger = logging.getLogger(__name__)
@@ -172,6 +172,9 @@ class ChatGPTTeamAPI:
         self.workspace_options_cache = []
         self.http_transport = None
         self.transport_name = None
+        # 页面内 fetch 命中 Cloudflare 托管挑战（响应头 cf-mitigated: challenge）时置位，
+        # 用于把"XHR 拿到整页 HTML 挑战而挂死"的情况兜底为顶层导航重试。
+        self._cf_challenged = False
 
     def _visible_locator_in_frames(self, selectors, timeout_ms=5000):
         selector = ", ".join(selectors)
@@ -338,10 +341,7 @@ class ChatGPTTeamAPI:
         try:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(**get_playwright_launch_options())
-            self.context = self.browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-            )
+            self.context = self.browser.new_context(**get_playwright_context_options())
             # 抹掉自动化痕迹，降低 Cloudflare Turnstile 的风控评分。
             # patchright 已在内核层处理 webdriver，再手动注入反而引入新痕迹，故仅官方 playwright 时注入。
             if not USING_PATCHRIGHT:
@@ -349,6 +349,8 @@ class ChatGPTTeamAPI:
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
                 )
             self.page = self.context.new_page()
+            self._cf_challenged = False
+            self.page.on("response", self._note_cf_challenge)
         except Exception:
             self.stop()
             raise
@@ -420,6 +422,36 @@ class ChatGPTTeamAPI:
                 clicked = self._click_turnstile_checkbox()
             logger.info("[ChatGPT] 等待 Cloudflare... (%ds)", i * 5)
             time.sleep(5)
+
+    def _note_cf_challenge(self, response):
+        """监听响应：捕获 Cloudflare 托管挑战（cf-mitigated: challenge）。
+
+        ChatGPT 登录按钮发起的是页面内 fetch(/api/auth/signin/openai?json=true)，
+        一旦被 Cloudflare 以 403 + cf-mitigated: challenge 拦截，前端拿 HTML 当 JSON
+        解析会静默失败、页面挂死。这里只置位标志，由调用方改走顶层导航兜底。
+        """
+        try:
+            if response.status == 403 and (response.headers or {}).get("cf-mitigated") == "challenge":
+                self._cf_challenged = True
+                logger.warning("[ChatGPT] 捕获到 Cloudflare 托管挑战响应: %s", response.url)
+        except Exception:
+            pass
+
+    def _recover_login_via_top_navigation(self):
+        """站内登录 fetch 命中 Cloudflare 托管挑战时的兜底：改用顶层导航到 OpenAI 登录页。
+
+        顶层导航触发的挑战会以可解的整页形式出现，从而能交给 _wait_for_cloudflare
+        点选 Turnstile 通过，而不是卡在无法处理的 XHR 挑战上。
+        """
+        logger.warning("[ChatGPT] 站内登录请求命中 Cloudflare 托管挑战，改为顶层导航到 auth.openai.com/log-in 重试")
+        self._cf_challenged = False
+        try:
+            self.page.goto("https://auth.openai.com/log-in", wait_until="domcontentloaded", timeout=60000)
+            time.sleep(3)
+            self._wait_for_cloudflare()
+            self._log_login_state("顶层导航登录页后")
+        except Exception as exc:
+            logger.warning("[ChatGPT] 顶层导航登录页失败: %s", exc)
 
     def _build_session_cookies(self, session_token, domain):
         if len(session_token) > 3800:
@@ -1071,14 +1103,22 @@ class ChatGPTTeamAPI:
             self._wait_for_cloudflare()
             self._log_login_state(f"打开登录页后（{index}/{len(LOGIN_PAGE_URLS)}）")
 
-            try:
-                login_btn = self.page.locator('button:has-text("登录"), button:has-text("Log in")').first
-                if login_btn.is_visible(timeout=3000):
-                    login_btn.click()
-                    time.sleep(2)
-                    self._log_login_state("点击登录按钮后")
-            except Exception:
-                pass
+            # auth.openai.com/log-in 通常直接呈现邮箱表单，无需点击站内按钮。
+            # chatgpt.com/auth/login 的"登录"按钮会发起页面内 fetch(/api/auth/signin/openai)，
+            # 一旦命中 Cloudflare 托管挑战只会拿到整页 HTML 而挂死，因此：能直接看到邮箱框就
+            # 不点按钮；必须点时，点完检测到挑战就改走顶层导航兜底。
+            if not self._visible_email_locator(timeout_ms=1500):
+                self._cf_challenged = False
+                try:
+                    login_btn = self.page.locator('button:has-text("登录"), button:has-text("Log in")').first
+                    if login_btn.is_visible(timeout=3000):
+                        login_btn.click()
+                        time.sleep(2)
+                        self._log_login_state("点击登录按钮后")
+                except Exception:
+                    pass
+                if self._cf_challenged:
+                    self._recover_login_via_top_navigation()
 
             step, detail = self._wait_for_login_step(allowed_steps, timeout=4)
             if step == "email_required" and not self._visible_email_locator(timeout_ms=1500):
