@@ -30,9 +30,10 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --no-dev
 
-# 安装 Playwright 浏览器（patchright 优先，回退官方 playwright）
+# 安装浏览器依赖（patchright 优先，回退官方 playwright）
+# patchright 使用 channel="chrome" 需要真实 Chrome 的系统依赖
 RUN uv run playwright install chromium && uv run playwright install-deps chromium
-RUN uv run patchright install chromium || echo "patchright 未安装，跳过"
+RUN uv run patchright install chrome || echo "patchright 未安装，跳过"
 
 # 复制源码
 COPY src/ src/
