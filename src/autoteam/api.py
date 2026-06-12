@@ -1387,7 +1387,7 @@ def _desktop_url_for_request(request: Request) -> str:
             "encrypt": "1" if _request_public_scheme(request) == "https" else "0",
             "resize": "remote",
             "reconnect": "true",
-            "path": ws_path.lstrip("/"),
+            "path": ws_path,
         }
     )
     return f"/desktop/vnc.html?{params}"
