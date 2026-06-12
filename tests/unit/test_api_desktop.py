@@ -5,10 +5,12 @@ from starlette.requests import Request
 from autoteam import api
 
 
-def _request(token: str = "") -> Request:
+def _request(token: str = "", forwarded_proto: str = "") -> Request:
     headers = []
     if token:
         headers.append((b"authorization", f"Bearer {token}".encode()))
+    if forwarded_proto:
+        headers.append((b"x-forwarded-proto", forwarded_proto.encode()))
     return Request(
         {
             "type": "http",
@@ -23,13 +25,24 @@ def _request(token: str = "") -> Request:
 def test_desktop_url_uses_encoded_path_token(monkeypatch):
     monkeypatch.setattr(api, "API_KEY", "api-key/with-symbols")
 
-    url = api._desktop_url_for_request(_request("api-key/with-symbols"))
-    path = parse_qs(urlsplit(url).query)["path"][0]
+    url = api._desktop_url_for_request(_request("api-key/with-symbols", forwarded_proto="https"))
+    query = parse_qs(urlsplit(url).query)
+    path = query["path"][0]
     encoded_token = path.rsplit("/", 1)[-1]
 
     assert path.startswith("api/desktop/ws/")
     assert "key=" not in path
     assert api._decode_desktop_token(encoded_token) == "api-key/with-symbols"
+    assert query["encrypt"][0] == "1"
+
+
+def test_desktop_url_keeps_plain_ws_for_http(monkeypatch):
+    monkeypatch.setattr(api, "API_KEY", "")
+
+    url = api._desktop_url_for_request(_request())
+    query = parse_qs(urlsplit(url).query)
+
+    assert query["encrypt"][0] == "0"
 
 
 def test_desktop_status_reports_missing_novnc_page(tmp_path, monkeypatch):

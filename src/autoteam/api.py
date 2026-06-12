@@ -1354,6 +1354,13 @@ def _request_api_token(request: Request) -> str:
     return request.query_params.get("key", "")
 
 
+def _request_public_scheme(request: Request) -> str:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    if forwarded_proto:
+        return forwarded_proto.split(",", 1)[0].strip().lower()
+    return str(request.url.scheme or "").lower()
+
+
 def _encode_desktop_token(token: str) -> str:
     encoded = base64.urlsafe_b64encode(token.encode("utf-8")).decode("ascii")
     return encoded.rstrip("=")
@@ -1377,6 +1384,7 @@ def _desktop_url_for_request(request: Request) -> str:
     params = urlencode(
         {
             "autoconnect": "true",
+            "encrypt": "1" if _request_public_scheme(request) == "https" else "0",
             "resize": "remote",
             "reconnect": "true",
             "path": ws_path.lstrip("/"),
