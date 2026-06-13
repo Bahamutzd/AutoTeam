@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 BASE_DIR = PROJECT_ROOT
 SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
+# chatgpt.com 域整体被 Cloudflare 托管挑战拦截（数据中心 IP 易触发），
+# 直接跳到 Auth0 登录页可绕开 chatgpt.com 的 CF；登录完成后 Auth0 会自动
+# 302 回 chatgpt.com 颁发 session cookie，那时已是"已登录用户"身份，CF 评分较低。
 LOGIN_PAGE_URLS = (
+    "https://auth.openai.com/log-in",
     "https://chatgpt.com/auth/login",
 )
 LOGIN_URL_MARKERS = (
@@ -178,7 +182,7 @@ class ChatGPTTeamAPI:
         self.context = None
         self.page = None
         self.access_token = None
-        self.session_token = None
+        self.session_token = get_admin_session_token()
         self.account_id = get_chatgpt_account_id()
         self.workspace_name = get_chatgpt_workspace_name()
         self.oai_device_id = str(uuid.uuid4())
@@ -1131,7 +1135,12 @@ class ChatGPTTeamAPI:
         self._auto_detect_workspace()
 
     def _open_login_page(self):
-        """导航到登录页面，通过 Cloudflare 后返回可用的登录步骤。"""
+        """导航到登录页面，通过 Cloudflare 后返回可用的登录步骤。
+
+        策略：优先走 auth.openai.com/log-in（不经 chatgpt.com 域的 CF 托管挑战），
+        失败再回退到 chatgpt.com/auth/login。Auth0 登录完成后会自动 302 回
+        chatgpt.com 颁发 session cookie，那时浏览器已是"已登录"身份，CF 评分较低。
+        """
         allowed_steps = {
             "email_required",
             "password_required",
@@ -1141,38 +1150,26 @@ class ChatGPTTeamAPI:
             "error",
         }
 
-        # chatgpt.com/auth/login 目前是唯一的登录入口。
-        # CF 对这个域使用托管挑战 —— HTML 正常加载但所有 API 被静默 403。
-        # 先导航到首页（不是直接 auth/login），这样 CF JS 挑战有机会完成并设
-        # cf_clearance cookie，之后再导航到登录页就能正常请求 API。
-        logger.info("[ChatGPT] 通过 chatgpt.com 首页过 Cloudflare 托管挑战...")
-        self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
-        self._wait_for_cloudflare()
-        self._log_login_state("首页 Cloudflare 通过后")
-
-        logger.info("[ChatGPT] 导航到登录页...")
-        self.page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
-        self._wait_for_cloudflare()
-        self._log_login_state("打开登录页后")
-
-        # 邮箱框直接可见就不点击站内"登录"按钮（按钮发 XHR 可能命中托管挑战）；
-        # 必须点击时，检测到托管挑战则等 _wait_for_cloudflare 重新加载页面后继续。
-        if not self._visible_email_locator(timeout_ms=1500):
+        for url in LOGIN_PAGE_URLS:
+            logger.info("[ChatGPT] 导航到登录页: %s", url)
             self._cf_challenged = False
             try:
-                login_btn = self.page.locator('button:has-text("登录"), button:has-text("Log in")').first
-                if login_btn.is_visible(timeout=3000):
-                    login_btn.click()
-                    time.sleep(2)
-                    self._log_login_state("点击登录按钮后")
-            except Exception:
-                pass
-            if self._cf_challenged:
-                logger.warning("[ChatGPT] 登录按钮触发托管挑战，等待重新加载页面通过...")
-                self._wait_for_cloudflare()
-                self._log_login_state("托管挑战解决后")
+                self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as exc:
+                logger.warning("[ChatGPT] 登录页 %s 导航失败: %s", url, exc)
+                continue
+            time.sleep(5)
+            self._wait_for_cloudflare()
+            self._log_login_state(f"打开登录页 {url} 后")
+
+            # 邮箱框可见即视为成功；否则尝试下一个候选 URL。
+            if self._visible_email_locator(timeout_ms=2500):
+                break
+            current_url = (self.page.url or "").lower()
+            if _is_login_page_url(current_url):
+                # URL 已是登录页（可能 DOM 还没渲染完），不再换 URL。
+                break
+            logger.warning("[ChatGPT] %s 未找到邮箱输入框，尝试下一个登录入口", url)
 
         step, detail = self._wait_for_login_step(allowed_steps, timeout=4)
         if step not in allowed_steps and self._visible_email_locator(timeout_ms=1500):
@@ -1529,10 +1526,8 @@ class ChatGPTTeamAPI:
             self._launch_browser()
 
         logger.info("[ChatGPT] 开始%s登录: %s", actor_label, email)
-        self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(5)
-        self._wait_for_cloudflare()
-        self._log_login_state("进入 chatgpt.com 后")
+        # 跳过 chatgpt.com 首页预热 —— 该域被 CF 托管挑战静默 403 所有请求，
+        # 走过去只会污染 cookie 评分。直接进 _open_login_page() 走 auth.openai.com。
         self._open_login_page()
 
         step, detail = self._wait_for_login_step(
