@@ -958,8 +958,8 @@ def login_codex_via_browser(
         logger.info("[Codex] 先登录 ChatGPT 选择 Team workspace...")
         _page = context.new_page()
 
-        # 监听 Cloudflare 托管挑战：站内 fetch(/api/auth/signin/openai) 被 403 + cf-mitigated
-        # 拦截时置位，便于改走顶层导航兜底（XHR 拿到整页 HTML 挑战无法处理，会让页面挂死）。
+        # 监听 Cloudflare 托管挑战（cf-mitigated: challenge），_cf_challenged_loop 用于
+        # _wait_for_cf 重新加载页面让 CF 后台 JS 挑战完成。
         _cf_state = {"challenged": False}
 
         def _on_cf_response(response):
@@ -972,18 +972,41 @@ def login_codex_via_browser(
 
         _page.on("response", _on_cf_response)
 
+        def _wait_for_cf(max_attempts=12):
+            """等待 Cloudflare 挑战通过（显式 Turnstile 或静默托管挑战）。"""
+            reload_attempts = 0
+            for _i in range(max_attempts):
+                html = _page.content()[:2000].lower() if _page else ""
+                url_has_challenge = "challenge" in (_page.url or "").lower()
+                if "verify you are human" not in html and not url_has_challenge:
+                    if not _cf_state["challenged"]:
+                        return
+                    if reload_attempts < 3:
+                        reload_attempts += 1
+                        _cf_state["challenged"] = False
+                        logger.info("[Codex] 检测到托管挑战，重新加载页面 (%d/3)...", reload_attempts)
+                        try:
+                            _page.reload(wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            pass
+                        continue
+                    logger.warning("[Codex] 托管挑战重试 3 次后仍未通过")
+                    return
+                time.sleep(5)
+
+        # 先访问 chatgpt.com 首页，让 CF 托管挑战有机会完成并设置 cf_clearance cookie
+        logger.info("[Codex] 通过 chatgpt.com 首页过 Cloudflare 托管挑战...")
+        _page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+        time.sleep(5)
+        _wait_for_cf()
+
+        logger.info("[Codex] 导航到登录页...")
         _page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
+        _wait_for_cf()
 
-        # Cloudflare 整页挑战
-        for _i in range(12):
-            if "verify you are human" not in _page.content()[:2000].lower():
-                break
-            time.sleep(5)
-
-        # 进入登录表单：邮箱框已直接出现就不点站内"登录"按钮（其 fetch 会命中托管挑战）；
-        # 必须点击且点完检测到挑战时，改为顶层导航到 auth.openai.com/log-in，让挑战以可解的
-        # 整页形式出现后再继续。
+        # 邮箱框直接可见就不点击站内"登录"按钮（按钮发 XHR 可能命中托管挑战）；
+        # 必须点击时，检测到托管挑战则重新加载页面再等。
         _email_visible = False
         try:
             _email_visible = _page.locator(
@@ -1000,16 +1023,8 @@ def login_codex_via_browser(
             except Exception:
                 pass
             if _cf_state["challenged"]:
-                logger.warning("[Codex] 站内登录请求命中 Cloudflare 托管挑战，改为顶层导航到 auth.openai.com/log-in 重试")
-                try:
-                    _page.goto("https://auth.openai.com/log-in", wait_until="domcontentloaded", timeout=60000)
-                    time.sleep(3)
-                    for _i in range(12):
-                        if "verify you are human" not in _page.content()[:2000].lower():
-                            break
-                        time.sleep(5)
-                except Exception as exc:
-                    logger.warning("[Codex] 顶层导航登录页失败: %s", exc)
+                logger.warning("[Codex] 登录按钮触发托管挑战，等待重新加载页面通过...")
+                _wait_for_cf()
 
         # 输入邮箱（避免误点 Google/Microsoft 第三方登录按钮）
         email_submitted = False

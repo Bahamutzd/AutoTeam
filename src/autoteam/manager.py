@@ -1678,6 +1678,40 @@ def _detect_direct_register_step(page):
     return "unknown"
 
 
+def _wait_for_direct_cloudflare(page, cf_challenged=None):
+    """等待 Cloudflare 挑战通过（显式 Turnstile 或静默托管挑战）。
+
+    cf_challenged 是 {"value": bool} 字典，由页面 response 监听器更新。
+    托管挑战（chatgpt.com 静默 403 所有 API）无可见 UI，通过重新加载页面让 CF 后台 JS 完成。
+    """
+    reload_attempts = 0
+    for i in range(12):
+        try:
+            html = page.content()[:2000].lower()
+        except Exception:
+            html = ""
+        url_has_challenge = "challenge" in (page.url or "").lower()
+
+        if "verify you are human" not in html and not url_has_challenge:
+            if not cf_challenged or not cf_challenged.get("value"):
+                return
+            if reload_attempts < 3:
+                reload_attempts += 1
+                if cf_challenged:
+                    cf_challenged["value"] = False
+                logger.info("[直接注册] 检测到托管挑战，重新加载页面 (%d/3)...", reload_attempts)
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                time.sleep(5)
+                continue
+            logger.warning("[直接注册] 托管挑战重试 3 次后仍未通过")
+            return
+        logger.info("[直接注册] 等待 Cloudflare... (%ds)", i * 5)
+        time.sleep(5)
+
+
 def _wait_for_direct_register_step(page, allowed_steps, timeout=15):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1822,15 +1856,27 @@ def _register_direct_once(
         context = browser.new_context(**get_playwright_context_options())
         page = context.new_page()
 
+        # 先访问 chatgpt.com 首页过 Cloudflare 托管挑战，设置 cf_clearance cookie
+        _cf_challenged = {"value": False}
+
+        def _on_cf_response(response):
+            try:
+                if response.status == 403 and (response.headers or {}).get("cf-mitigated") == "challenge":
+                    _cf_challenged["value"] = True
+            except Exception:
+                pass
+
+        page.on("response", _on_cf_response)
+        logger.info("[直接注册] 通过 chatgpt.com 首页过 Cloudflare 托管挑战...")
+        page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+        time.sleep(5)
+        _wait_for_direct_cloudflare(page, _cf_challenged)
+        _safe_invite_screenshot(page, "direct_00_homepage_cf.png")
+
+        logger.info("[直接注册] 导航到登录页...")
         page.goto(signup_url, wait_until="domcontentloaded", timeout=60000)
         time.sleep(5)
-
-        for i in range(12):
-            html = page.content()[:2000].lower()
-            if "verify you are human" not in html and "challenge" not in page.url:
-                break
-            logger.info("[直接注册] 等待 Cloudflare... (%ds)", i * 5)
-            time.sleep(5)
+        _wait_for_direct_cloudflare(page, _cf_challenged)
 
         _safe_invite_screenshot(page, "direct_01_login_page.png")
 

@@ -26,7 +26,6 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 BASE_DIR = PROJECT_ROOT
 SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
 LOGIN_PAGE_URLS = (
-    "https://auth.openai.com/log-in",
     "https://chatgpt.com/auth/login",
 )
 LOGIN_URL_MARKERS = (
@@ -412,12 +411,40 @@ class ChatGPTTeamAPI:
         return False
 
     def _wait_for_cloudflare(self):
+        """等待 Cloudflare 挑战通过（显式 Turnstile 或静默托管挑战）。
+
+        处理两种挑战类型：
+        1. 显式挑战（DOM 中含 "Verify you are human" 或 URL 含 "challenge"）
+           → 尝试点击 Turnstile 复选框
+        2. 托管挑战（静默 403 所有 API 请求，无可见 UI，HAR 中 cf-mitigated: challenge）
+           → 页面 HTML 加载正常但 API 全被拦，_note_cf_challenge 监听器会置位
+             _cf_challenged → 重新加载页面让 CF 后台 JS 挑战完成并设置 cf_clearance cookie
+        """
         clicked = False
+        reload_attempts = 0
         for i in range(12):
             html = self.page.content()[:1000].lower()
-            if "verify you are human" not in html and "challenge" not in self.page.url:
+            url_has_challenge = "challenge" in (self.page.url or "").lower()
+
+            if "verify you are human" not in html and not url_has_challenge:
+                # 无可见挑战 UI → 检查是否有静默托管挑战
+                if not self._cf_challenged:
+                    return  # 一切正常
+                # 托管挑战：重新加载页面，给 CF 后台 JS 挑战时间完成
+                if reload_attempts < 3:
+                    reload_attempts += 1
+                    self._cf_challenged = False
+                    logger.info("[ChatGPT] 检测到托管挑战，重新加载页面 (%d/3)...", reload_attempts)
+                    try:
+                        self.page.reload(wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                    time.sleep(5)
+                    continue
+                logger.warning("[ChatGPT] 托管挑战重试 3 次后仍未通过")
                 return
-            # 等一轮让 widget 渲染出来，再尝试点一次复选框
+
+            # 显式挑战：等待 widget 渲染后尝试点击
             if not clicked and i >= 1:
                 clicked = self._click_turnstile_checkbox()
             logger.info("[ChatGPT] 等待 Cloudflare... (%ds)", i * 5)
@@ -426,9 +453,9 @@ class ChatGPTTeamAPI:
     def _note_cf_challenge(self, response):
         """监听响应：捕获 Cloudflare 托管挑战（cf-mitigated: challenge）。
 
-        ChatGPT 登录按钮发起的是页面内 fetch(/api/auth/signin/openai?json=true)，
-        一旦被 Cloudflare 以 403 + cf-mitigated: challenge 拦截，前端拿 HTML 当 JSON
-        解析会静默失败、页面挂死。这里只置位标志，由调用方改走顶层导航兜底。
+        chatgpt.com 的托管挑战不会弹出可见 UI，而是静默 403 所有 API 请求
+        （/backend-anon/*、/api/auth/signin/openai 等）。此监听器置位 _cf_challenged，
+        _wait_for_cloudflare 检测到后会重新加载页面让 CF 后台 JS 挑战完成。
         """
         try:
             if response.status == 403 and (response.headers or {}).get("cf-mitigated") == "challenge":
@@ -436,22 +463,6 @@ class ChatGPTTeamAPI:
                 logger.warning("[ChatGPT] 捕获到 Cloudflare 托管挑战响应: %s", response.url)
         except Exception:
             pass
-
-    def _recover_login_via_top_navigation(self):
-        """站内登录 fetch 命中 Cloudflare 托管挑战时的兜底：改用顶层导航到 OpenAI 登录页。
-
-        顶层导航触发的挑战会以可解的整页形式出现，从而能交给 _wait_for_cloudflare
-        点选 Turnstile 通过，而不是卡在无法处理的 XHR 挑战上。
-        """
-        logger.warning("[ChatGPT] 站内登录请求命中 Cloudflare 托管挑战，改为顶层导航到 auth.openai.com/log-in 重试")
-        self._cf_challenged = False
-        try:
-            self.page.goto("https://auth.openai.com/log-in", wait_until="domcontentloaded", timeout=60000)
-            time.sleep(3)
-            self._wait_for_cloudflare()
-            self._log_login_state("顶层导航登录页后")
-        except Exception as exc:
-            logger.warning("[ChatGPT] 顶层导航登录页失败: %s", exc)
 
     def _build_session_cookies(self, session_token, domain):
         if len(session_token) > 3800:
@@ -1086,7 +1097,7 @@ class ChatGPTTeamAPI:
         self._auto_detect_workspace()
 
     def _open_login_page(self):
-        accepted_url = LOGIN_PAGE_URLS[-1]
+        """导航到登录页面，通过 Cloudflare 后返回可用的登录步骤。"""
         allowed_steps = {
             "email_required",
             "password_required",
@@ -1096,57 +1107,45 @@ class ChatGPTTeamAPI:
             "error",
         }
 
-        for index, login_url in enumerate(LOGIN_PAGE_URLS, start=1):
-            self.page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
-            accepted_url = login_url
-            time.sleep(5)
-            self._wait_for_cloudflare()
-            self._log_login_state(f"打开登录页后（{index}/{len(LOGIN_PAGE_URLS)}）")
+        # chatgpt.com/auth/login 目前是唯一的登录入口。
+        # CF 对这个域使用托管挑战 —— HTML 正常加载但所有 API 被静默 403。
+        # 先导航到首页（不是直接 auth/login），这样 CF JS 挑战有机会完成并设
+        # cf_clearance cookie，之后再导航到登录页就能正常请求 API。
+        logger.info("[ChatGPT] 通过 chatgpt.com 首页过 Cloudflare 托管挑战...")
+        self.page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=60000)
+        time.sleep(5)
+        self._wait_for_cloudflare()
+        self._log_login_state("首页 Cloudflare 通过后")
 
-            # auth.openai.com/log-in 通常直接呈现邮箱表单，无需点击站内按钮。
-            # chatgpt.com/auth/login 的"登录"按钮会发起页面内 fetch(/api/auth/signin/openai)，
-            # 一旦命中 Cloudflare 托管挑战只会拿到整页 HTML 而挂死，因此：能直接看到邮箱框就
-            # 不点按钮；必须点时，点完检测到挑战就改走顶层导航兜底。
-            if not self._visible_email_locator(timeout_ms=1500):
-                self._cf_challenged = False
-                try:
-                    login_btn = self.page.locator('button:has-text("登录"), button:has-text("Log in")').first
-                    if login_btn.is_visible(timeout=3000):
-                        login_btn.click()
-                        time.sleep(2)
-                        self._log_login_state("点击登录按钮后")
-                except Exception:
-                    pass
-                if self._cf_challenged:
-                    self._recover_login_via_top_navigation()
+        logger.info("[ChatGPT] 导航到登录页...")
+        self.page.goto("https://chatgpt.com/auth/login", wait_until="domcontentloaded", timeout=60000)
+        time.sleep(5)
+        self._wait_for_cloudflare()
+        self._log_login_state("打开登录页后")
 
-            step, detail = self._wait_for_login_step(allowed_steps, timeout=4)
-            if step == "email_required" and not self._visible_email_locator(timeout_ms=1500):
-                if index < len(LOGIN_PAGE_URLS):
-                    logger.warning(
-                        "[ChatGPT] 登录页未出现邮箱输入框，尝试备用登录页 | URL=%s | detail=%s",
-                        self.page.url,
-                        detail,
-                    )
-                    continue
+        # 邮箱框直接可见就不点击站内"登录"按钮（按钮发 XHR 可能命中托管挑战）；
+        # 必须点击时，检测到托管挑战则等 _wait_for_cloudflare 重新加载页面后继续。
+        if not self._visible_email_locator(timeout_ms=1500):
+            self._cf_challenged = False
+            try:
+                login_btn = self.page.locator('button:has-text("登录"), button:has-text("Log in")').first
+                if login_btn.is_visible(timeout=3000):
+                    login_btn.click()
+                    time.sleep(2)
+                    self._log_login_state("点击登录按钮后")
+            except Exception:
+                pass
+            if self._cf_challenged:
+                logger.warning("[ChatGPT] 登录按钮触发托管挑战，等待重新加载页面通过...")
+                self._wait_for_cloudflare()
+                self._log_login_state("托管挑战解决后")
 
-            if step in allowed_steps:
-                logger.info(
-                    "[ChatGPT] 登录页候选可用: %s | step=%s | current_url=%s",
-                    login_url,
-                    step,
-                    self.page.url,
-                )
-                break
+        step, detail = self._wait_for_login_step(allowed_steps, timeout=4)
+        if step not in allowed_steps and self._visible_email_locator(timeout_ms=1500):
+            step = "email_required"
 
-            if index < len(LOGIN_PAGE_URLS):
-                logger.warning(
-                    "[ChatGPT] 登录页候选未识别，尝试备用登录页 | URL=%s | detail=%s",
-                    self.page.url,
-                    detail,
-                )
-
-        return accepted_url
+        logger.info("[ChatGPT] 登录页结果: step=%s current_url=%s", step, self.page.url)
+        return self.page.url
 
     def _list_workspace_options(self):
         if not self._is_workspace_selection_page():
