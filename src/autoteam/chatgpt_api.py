@@ -127,6 +127,22 @@ class ChatGPTTeamAPI:
         'input[inputmode="numeric"]',
         'input[autocomplete="one-time-code"]',
     ]
+    OTP_OPTION_SELECTORS = [
+        'button:has-text("一次性验证码")',
+        'button:has-text("邮箱验证码")',
+        'button:has-text("Email login")',
+        'button:has-text("email login")',
+        'button:has-text("one-time")',
+        'button:has-text("One-time")',
+        'button:has-text("email code")',
+        'button:has-text("Email code")',
+        'button:has-text("Use a one-time code")',
+        'a:has-text("一次性验证码")',
+        'a:has-text("邮箱验证码")',
+        'a:has-text("Email login")',
+        'a:has-text("one-time")',
+        'a:has-text("email code")',
+    ]
     _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
     _WORKSPACE_NAME_EXCLUDES = {
         "常规",
@@ -608,6 +624,24 @@ class ChatGPTTeamAPI:
             return True
         except Exception:
             return False
+
+    def _switch_password_to_otp(self):
+        """在密码输入页尝试切换到一次性邮箱验证码登录模式。
+
+        ChatGPT 登录页默认呈现密码输入框，页面底部通常有"使用一次性验证码登录"按钮。
+        返回 True 表示成功切换到验证码步骤（code_required），False 表示没有找到切换入口。
+        """
+        for selector in self.OTP_OPTION_SELECTORS:
+            try:
+                btn = self.page.locator(selector).first
+                if btn.is_visible(timeout=2000):
+                    logger.info("[ChatGPT] 检测到密码页，自动切换到一次性验证码登录")
+                    btn.click()
+                    time.sleep(3)
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _body_excerpt(self, limit=300):
         try:
@@ -1507,6 +1541,11 @@ class ChatGPTTeamAPI:
         )
         if step == "workspace_required":
             self._list_workspace_options()
+        if step == "password_required":
+            # 优先切换到一次性邮箱验证码登录，避免要求用户输入密码
+            if self._switch_password_to_otp():
+                step = "code_required"
+                detail = None
         if step in ("password_required", "code_required", "workspace_required", "completed", "error"):
             logger.info("[ChatGPT] %s登录初始步骤: %s | detail=%s", actor_label, step, detail)
             return {"step": step, "detail": detail}
@@ -1577,6 +1616,17 @@ class ChatGPTTeamAPI:
             self._log_login_state(f"{actor_label}邮箱提交后（第 {attempt} 次）")
             if final_step == "workspace_required":
                 self._list_workspace_options()
+            # 检测到密码页时优先切到一次性邮箱验证码登录，避免要求用户输入密码
+            if final_step == "password_required":
+                if self._switch_password_to_otp():
+                    final_step, final_detail = self._wait_for_login_step_change(
+                        "password_required",
+                        {"code_required", "workspace_required", "completed", "error"},
+                        timeout=8,
+                    )
+                    self._log_login_state(f"{actor_label}切换到一次性验证码后")
+                    if final_step == "workspace_required":
+                        self._list_workspace_options()
             if final_step != "email_required":
                 break
             logger.warning(
