@@ -188,6 +188,9 @@ def delete_account_from_configured_targets(
             for item in list_cpa_files():
                 item_email = (item.get("email") or "").lower()
                 item_name = item.get("name") or ""
+                # 只处理 codex 相关文件，避免误删 xAI 等其他类型的认证文件
+                if not item_name.startswith("codex-") and item_name not in auth_name_set:
+                    continue
                 if item_email == email.lower() or item_name in auth_name_set:
                     if delete_from_cpa(item_name):
                         deleted.append(item_name)
