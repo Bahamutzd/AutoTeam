@@ -700,6 +700,9 @@ def sync_to_cpa():
     skipped_keep = 0
     for name, cpa_file in cpa_names.items():
         email = cpa_file.get("email", "").lower()
+        # 只处理 codex 文件，xAI 等其他类型文件不归本同步逻辑管辖，避免误删
+        if not name.startswith("codex-"):
+            continue
         if email in local_emails and name not in active_files:
             if keep_plans:
                 plan = _resolve_cpa_plan_type(name, cpa_file)
