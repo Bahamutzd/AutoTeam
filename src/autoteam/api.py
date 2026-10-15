@@ -908,13 +908,19 @@ class _PlaywrightExecutor:
         self._queue: _queue.Queue = _queue.Queue()
         self._thread: threading.Thread | None = None
         self._broken_reason: str | None = None
+        self._state_lock = threading.Lock()
 
     def _worker(self):
         while True:
             item = self._queue.get()
             if item is None:
                 break
-            func, args, kwargs, result_event, result_holder = item
+            func, args, kwargs, started_event, result_event, result_holder = item
+            # 排队超时的任务已被调用方放弃，直接跳过
+            with self._state_lock:
+                if result_holder.get("cancelled"):
+                    continue
+                started_event.set()
             try:
                 result_holder["result"] = func(*args, **kwargs)
             except Exception as e:
@@ -932,11 +938,22 @@ class _PlaywrightExecutor:
     def run(self, func, *args, timeout_seconds=300, **kwargs):
         """在专用线程中执行函数，阻塞等待结果"""
         self.ensure_started()
+        started_event = threading.Event()
         result_event = threading.Event()
         result_holder: dict = {}
-        self._queue.put((func, args, kwargs, result_event, result_holder))
-        if not result_event.wait(timeout=max(1, timeout_seconds)):
-            func_name = getattr(func, "__name__", repr(func))
+        func_name = getattr(func, "__name__", repr(func))
+        wait_seconds = max(1, timeout_seconds)
+        self._queue.put((func, args, kwargs, started_event, result_event, result_holder))
+        # 排队等待：前一个任务尚未结束，仅放弃本任务，不熔断执行器
+        if not started_event.wait(timeout=wait_seconds):
+            with self._state_lock:
+                if not started_event.is_set():
+                    result_holder["cancelled"] = True
+                    message = f"Playwright 专用线程繁忙，排队等待超时（>{timeout_seconds}s）: {func_name}；任务已取消"
+                    logger.warning("[API] %s", message)
+                    raise TimeoutError(message)
+        # 执行等待：超时从真正开始执行时计算，超时说明浏览器操作卡死，熔断执行器
+        if not result_event.wait(timeout=wait_seconds):
             self._broken_reason = (
                 f"Playwright 专用线程执行超时（>{timeout_seconds}s）: {func_name}；"
                 "为避免浏览器进程继续堆积，已拒绝后续专用线程任务，请重启服务"
@@ -1387,7 +1404,8 @@ def _desktop_url_for_request(request: Request) -> str:
             "encrypt": "1" if _request_public_scheme(request) == "https" else "0",
             "resize": "remote",
             "reconnect": "true",
-            "path": ws_path,
+            # noVNC 会以 '/' + path 拼接 WebSocket 地址，带前导斜杠会变成 //api/... 导致 403
+            "path": ws_path.lstrip("/"),
         }
     )
     return f"/desktop/vnc.html?{params}"
@@ -1839,6 +1857,9 @@ def post_admin_login_start(params: AdminEmailParams):
     """开始管理员登录流程。"""
     global _admin_login_api, _admin_login_step
 
+    if _admin_login_api and _admin_login_step == "starting":
+        raise HTTPException(status_code=409, detail="管理员登录正在启动中，请稍候，不要重复提交")
+
     if _admin_login_api:
         try:
             _pw_executor.run(_admin_login_api.stop)
@@ -2043,6 +2064,8 @@ def post_admin_login_workspace(params: AdminWorkspaceParams):
 def post_admin_login_cancel():
     """取消管理员登录流程。"""
     global _admin_login_api, _admin_login_step
+    if _admin_login_api and _admin_login_step == "starting":
+        raise HTTPException(status_code=409, detail="管理员登录正在启动中，请等待启动结果后再取消")
     if _admin_login_api:
         try:
             _pw_executor.run(_admin_login_api.stop)

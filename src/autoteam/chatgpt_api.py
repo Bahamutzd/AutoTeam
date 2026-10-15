@@ -171,6 +171,8 @@ class ChatGPTTeamAPI:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
             )
             self.page = self.context.new_page()
+            # 未显式指定 timeout 的操作默认 30s，多次重试累加会拖住专用线程
+            self.page.set_default_timeout(10000)
         except Exception:
             self.stop()
             raise
