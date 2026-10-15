@@ -524,6 +524,7 @@ def _login_codex_with_result(
 
     last_result = None
     for attempt in range(1, max_attempts + 1):
+        _abort_if_cancel_requested()
         result = _single_attempt()
         result["attempts"] = attempt
         if result.get("ok"):
@@ -2122,6 +2123,7 @@ def create_account_direct(mail_client):
 
     success = False
     for attempt in range(3):
+        _abort_if_cancel_requested()
         logger.info("[直接注册] 开始第 %d/3 次注册尝试: %s", attempt + 1, email)
         success = _register_direct_once(
             mail_client,
@@ -2140,7 +2142,9 @@ def create_account_direct(mail_client):
 
         if attempt < 2:
             logger.warning("[直接注册] 注册失败且账号不在 Team 中，60 秒后重试: %s", email)
-            time.sleep(60)
+            for _ in range(60):
+                _abort_if_cancel_requested()
+                time.sleep(1)
 
     if not success:
         logger.error("[直接注册] 连续 3 次注册失败，删除临时账号: %s", email)

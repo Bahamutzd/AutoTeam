@@ -111,6 +111,7 @@ export const api = {
 
   getTasks: () => request('GET', '/tasks'),
   getTask: (id) => request('GET', `/tasks/${id}`),
+  forceStopTask: (id) => request('POST', `/tasks/${id}/force-stop`),
 
   getAutoCheckConfig: () => request('GET', '/config/auto-check'),
 

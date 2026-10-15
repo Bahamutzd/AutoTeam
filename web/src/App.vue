@@ -116,8 +116,27 @@
               ? '管理员登录中...'
               : busyTask.command === 'main-codex-sync'
                 ? '主号 Codex 同步中...'
-                : `${busyTask.command} 执行中...` }}
+                : busyTask.status === 'cancelling'
+                  ? `${busyTask.command} 终止中...`
+                  : `${busyTask.command} 执行中...` }}
           </span>
+          <button
+            v-if="busyTask.task_id"
+            @click="forceStopTask"
+            :disabled="forceStopping"
+            class="ml-auto rounded-lg border border-red-400/30 bg-red-500/15 px-3 py-1 text-xs font-medium text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {{ forceStopping ? '终止中...' : '强制终止' }}
+          </button>
+        </div>
+        <div
+          v-if="forceStopMessage"
+          class="mb-5 rounded-2xl border px-4 py-3 text-sm"
+          :class="forceStopError
+            ? 'border-red-500/20 bg-red-500/10 text-red-300'
+            : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'"
+        >
+          {{ forceStopMessage }}
         </div>
 
       <!-- 页面内容 -->
@@ -259,7 +278,7 @@ async function refresh() {
     adminStatus.value = admin
     codexStatus.value = codex
     manualAccountStatus.value = manualAccount
-    runningTask.value = t.find(t => t.status === 'running' || t.status === 'pending') || null
+    runningTask.value = t.find(t => ['running', 'pending', 'cancelling'].includes(t.status)) || null
   } catch (e) {
     if (e.status === 401) {
       authenticated.value = false
@@ -268,6 +287,29 @@ async function refresh() {
     console.error('刷新失败:', e)
   } finally {
     loading.value = false
+  }
+}
+
+const forceStopping = ref(false)
+const forceStopMessage = ref('')
+const forceStopError = ref(false)
+
+async function forceStopTask() {
+  const task = busyTask.value
+  if (!task?.task_id) return
+  if (!window.confirm(`确定强制终止任务 ${task.command}？浏览器会被直接关闭，当前进行中的步骤不会保存。`)) return
+  forceStopping.value = true
+  try {
+    const result = await api.forceStopTask(task.task_id)
+    forceStopError.value = false
+    forceStopMessage.value = result.message || '任务已强制终止'
+    await refresh()
+  } catch (e) {
+    forceStopError.value = true
+    forceStopMessage.value = e.message
+  } finally {
+    forceStopping.value = false
+    setTimeout(() => { forceStopMessage.value = '' }, 8000)
   }
 }
 

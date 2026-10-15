@@ -883,15 +883,42 @@ def _get_task_cancel_message(task: dict | None) -> str:
     return task.get("cancel_message") or "任务已终止"
 
 
+_task_thread_local = threading.local()
+
+
+def _resolve_task_id(task_id: str | None = None) -> str:
+    # 优先取本线程绑定的任务，强制终止后旧线程仍能识别自己已被终止
+    return task_id or getattr(_task_thread_local, "task_id", None) or _current_task_id or ""
+
+
 def is_task_cancel_requested(task_id: str | None = None) -> bool:
-    task = _tasks.get(task_id or _current_task_id or "")
+    task = _tasks.get(_resolve_task_id(task_id))
     return bool(task and task.get("cancel_requested"))
 
 
 def ensure_current_task_not_cancelled(task_id: str | None = None):
-    task = _tasks.get(task_id or _current_task_id or "")
+    task = _tasks.get(_resolve_task_id(task_id))
     if task and task.get("cancel_requested"):
         raise TaskCancelledError(_get_task_cancel_message(task))
+
+
+def _kill_playwright_browsers() -> int:
+    """结束 Playwright 拉起的 Chromium 进程，返回结束的进程数。"""
+    killed = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            executable = (entry / "cmdline").read_bytes().split(b"\0", 1)[0].decode("utf-8", "ignore")
+        except OSError:
+            continue
+        # 只认可执行文件位于 Playwright 浏览器目录下的进程，避免误杀命令行里恰好带这些字样的进程
+        if "/ms-playwright/" not in executable or "chrome" not in Path(executable).name:
+            continue
+        with contextlib.suppress(OSError):
+            os.kill(int(entry.name), signal.SIGKILL)
+            killed += 1
+    return killed
 
 
 # ---------------------------------------------------------------------------
@@ -1066,26 +1093,32 @@ def _run_task(task_id: str, func, *args, **kwargs):
 
     _playwright_lock.acquire()
     _current_task_id = task_id
+    _task_thread_local.task_id = task_id
     task["started_at"] = time.time()
     task["status"] = "cancelling" if task.get("cancel_requested") else "running"
 
     try:
         ensure_current_task_not_cancelled(task_id)
         result = func(*args, **kwargs)
-        task["status"] = "completed"
-        task["result"] = result
+        if not task.get("force_stopped"):
+            task["status"] = "completed"
+            task["result"] = result
     except TaskCancelledError as e:
-        task["status"] = "cancelled"
-        task["error"] = str(e)
+        if not task.get("force_stopped"):
+            task["status"] = "cancelled"
+            task["error"] = str(e)
         logger.warning("[API] 任务 %s 已终止: %s", task_id[:8], e)
     except Exception as e:
-        task["status"] = "failed"
-        task["error"] = str(e)
+        if not task.get("force_stopped"):
+            task["status"] = "failed"
+            task["error"] = str(e)
         logger.error("[API] 任务 %s 失败: %s", task_id[:8], e)
     finally:
-        task["finished_at"] = time.time()
-        _current_task_id = None
-        _playwright_lock.release()
+        # 强制终止时锁已由 force-stop 接口释放，线程后续醒来不再重复释放
+        if not task.get("force_stopped"):
+            task["finished_at"] = time.time()
+            _current_task_id = None
+            _playwright_lock.release()
 
 
 def _start_task(command: str, func, params: dict, *args, **kwargs) -> dict:
@@ -3102,6 +3135,46 @@ def cancel_task(task_id: str):
         "task_id": task_id,
         "status": task["status"],
         "message": "已发送终止请求，任务会在安全检查点停止",
+        "task": task,
+    }
+
+
+@app.post("/api/tasks/{task_id}/force-stop")
+def force_stop_task(task_id: str):
+    """强制终止后台任务：关闭浏览器并立即释放任务锁，不等待安全检查点。"""
+    global _current_task_id
+    task = _tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if task["status"] in _TASK_TERMINAL_STATUSES:
+        return {
+            "task_id": task_id,
+            "status": task["status"],
+            "message": "任务已结束，无需终止",
+            "task": task,
+        }
+
+    task["cancel_requested"] = True
+    task["cancel_requested_at"] = task.get("cancel_requested_at") or time.time()
+    task["cancel_message"] = "任务已被强制终止"
+    task["force_stopped"] = True
+    task["status"] = "cancelled"
+    task["error"] = "任务已被强制终止"
+    task["finished_at"] = time.time()
+
+    killed = _kill_playwright_browsers()
+
+    if _current_task_id == task_id:
+        _current_task_id = None
+        if _playwright_lock.locked():
+            _playwright_lock.release()
+
+    logger.warning("[API] 已强制终止任务 %s (%s)，结束浏览器进程 %d 个", task_id[:8], task.get("command", "unknown"), killed)
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "message": f"任务已强制终止，已关闭 {killed} 个浏览器进程",
         "task": task,
     }
 
